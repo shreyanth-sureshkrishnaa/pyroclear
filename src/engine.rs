@@ -18,13 +18,16 @@ const DIE_OUT_THRESHOLD: u8 = 2;
 
 pub struct Rng(u64);
 
+impl Default for Rng {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Rng {
     pub fn new() -> Self {
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos() as u64
-            | 1;
+        let d = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let seed = (d.as_secs().wrapping_mul(6364136223846793005) ^ d.subsec_nanos() as u64) | 1;
         Rng(seed)
     }
 
@@ -88,9 +91,14 @@ fn render(buf: &mut String, grid: &[u8], cols: usize, rows: usize, palette: &Pal
             };
 
             if last != Some(color) {
+                use std::fmt::Write as _;
                 match color {
-                    CellColor::Default => buf.push_str(&format!("{ESC}[49m")),
-                    CellColor::Rgb(r, g, b) => buf.push_str(&format!("{ESC}[48;2;{r};{g};{b}m")),
+                    CellColor::Default => {
+                        let _ = write!(buf, "{ESC}[49m");
+                    }
+                    CellColor::Rgb(r, g, b) => {
+                        let _ = write!(buf, "{ESC}[48;2;{r};{g};{b}m");
+                    }
                 }
                 last = Some(color);
             }

@@ -6,7 +6,7 @@ use crate::{
     ESC,
 };
 
-pub const VERSION: &str = "0.1.0";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ── Banner ────────────────────────────────────────────────────────────
 
@@ -270,7 +270,7 @@ pub fn print_color_list() {
         let palettes = &NAMED_PALETTES[start..end];
 
         if two_col {
-            let half = (count + 1) / 2;
+            let half = count.div_ceil(2);
             for row in 0..half {
                 let (id_l, _, _, from_l, to_l) = palettes[row];
                 let sw_l = render_swatch(id_l, from_l, to_l, sw_w);

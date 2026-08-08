@@ -40,6 +40,9 @@ pub enum PaletteChoice {
 // ── Custom palette storage path ──────────────────────────────────────
 
 pub fn config_dir() -> Option<PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(xdg).join("pyroclear"));
+    }
     let home = std::env::var("HOME").ok()?;
     Some(PathBuf::from(home).join(".config/pyroclear"))
 }
@@ -182,13 +185,15 @@ pub fn load_custom_palettes() -> Vec<CustomPaletteEntry> {
                  from: &mut String,
                  to: &mut String| {
         if !name.is_empty() && !from.is_empty() && !to.is_empty() {
+            let name_val = std::mem::take(name);
+            let display_val = if display.is_empty() {
+                name_val.clone()
+            } else {
+                std::mem::take(display)
+            };
             entries.push(CustomPaletteEntry {
-                name: std::mem::take(name),
-                display: if display.is_empty() {
-                    name.clone()
-                } else {
-                    std::mem::take(display)
-                },
+                name: name_val,
+                display: display_val,
                 from: std::mem::take(from),
                 to: std::mem::take(to),
             });
@@ -366,7 +371,7 @@ fn parse_args() -> (Option<PaletteChoice>, bool) {
             }
             "--reset" => {
                 let c = PaletteChoice::Named("fire".to_string());
-                let (_, default_settings) = load_config();
+                let default_settings = AnimSettings::default();
                 save_config(&c, &default_settings);
                 eprintln!(
                     "  {ESC}[38;2;255;200;80m◆ Reset:{ESC}[0m \
