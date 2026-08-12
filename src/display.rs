@@ -197,7 +197,11 @@ pub fn print_help() {
         );
     }
 
-    println!("\n  {ESC}[38;2;65;65;85mConfig: ~/.config/pyroclear/config.toml{ESC}[0m\n");
+    let cfg = match crate::config::config_path() {
+        Some(p) => p.display().to_string(),
+        None => "~/.config/pyroclear/config.toml (unresolved: no HOME set)".to_string(),
+    };
+    println!("\n  {ESC}[38;2;65;65;85mConfig: {cfg}{ESC}[0m\n");
 }
 
 // ── Start / onboarding ────────────────────────────────────────────────
