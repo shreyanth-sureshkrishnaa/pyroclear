@@ -43,12 +43,35 @@ pub enum PaletteChoice {
 
 // ── Custom palette storage path ──────────────────────────────────────
 
+/// Reads an env var, treating unset and empty as the same thing.
+fn env_path(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// The user's home directory.
+///
+/// On Windows `HOME` is normally unset (only MSYS/Git Bash sets it, and to a
+/// POSIX path like `/c/Users/x` that native Windows APIs can't open), so
+/// `USERPROFILE` is preferred there, with `HOMEDRIVE` + `HOMEPATH` as a
+/// fallback for the rare setups that only define those.
+fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        if let Some(profile) = env_path("USERPROFILE") {
+            return Some(PathBuf::from(profile));
+        }
+        if let (Some(drive), Some(path)) = (env_path("HOMEDRIVE"), env_path("HOMEPATH")) {
+            return Some(PathBuf::from(format!("{drive}{path}")));
+        }
+    }
+    env_path("HOME").map(PathBuf::from)
+}
+
 pub fn config_dir() -> Option<PathBuf> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+    if let Some(xdg) = env_path("XDG_CONFIG_HOME") {
         return Some(PathBuf::from(xdg).join("pyroclear"));
     }
-    let home = std::env::var("HOME").ok()?;
-    Some(PathBuf::from(home).join(".config/pyroclear"))
+    Some(home_dir()?.join(".config").join("pyroclear"))
 }
 
 pub fn config_path() -> Option<PathBuf> {

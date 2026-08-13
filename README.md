@@ -15,7 +15,7 @@ Written in modern Rust. Zero runtime dependencies beyond standard `libc` (Unix) 
   - **Color Picker (`--pick`)**: Browse, search, filter, and preview palettes in real-time.
   - **Settings Manager (`--settings`)**: Adjust FPS, wind/drift, and flame height in raw mode.
   - **Custom Palette Manager (`--custom`)**: Build, name, delete, and save your own hex gradients.
-- **Persistent Configuration**: Settings and palettes are automatically saved to `~/.config/pyroclear/config.toml` (using `$HOME` or user profile).
+- **Persistent Configuration**: Settings and palettes are automatically saved to `~/.config/pyroclear/config.toml` (`%USERPROFILE%\.config\pyroclear\config.toml` on Windows).
 - **Signal-safe**: Interrupted runs (Ctrl-C) restore the terminal state and cursor cleanly (via custom Unix SIGINT handlers / Windows console control handlers).
 - **Full terminal clear**: Erases both the visible screen **and** the scrollback buffer (via `\x1b[3J`) so nothing remains after the flames die out.
 
@@ -118,7 +118,13 @@ pyroclear [OPTIONS]
 
 Your preferences are saved in:
 - **Unix**: `~/.config/pyroclear/config.toml` (and `custom_palettes.toml` for custom palettes)
-- **Windows**: `%USERPROFILE%\.config\pyroclear\config.toml` (and `custom_palettes.toml` for custom palettes, resolved using `$HOME`)
+- **Windows**: `%USERPROFILE%\.config\pyroclear\config.toml` (and `custom_palettes.toml` for custom palettes)
+
+If `XDG_CONFIG_HOME` is set, `$XDG_CONFIG_HOME/pyroclear/` is used instead on every
+platform. Otherwise the home directory is resolved from `%USERPROFILE%` on Windows
+(falling back to `%HOMEDRIVE%%HOMEPATH%`, then `$HOME`) and from `$HOME` elsewhere.
+
+Run `pyroclear --help` to print the exact config path being used on your machine.
 
 ---
 
