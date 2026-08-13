@@ -30,16 +30,29 @@ cargo install pyroclear
 ```
 
 Or build from source:
-
-```bash
-# Clone the repository
-git clone https://github.com/shreyanth-sureshkrishnaa/pyroclear.git
-cd pyroclear
-
-# Build and install (installs to your Cargo bin folder, e.g. ~/.cargo/bin)
-cargo build --release
-cargo install --path .
-```
+- Install cargo
+  ```bash
+  # Arch based
+  sudo pacman -S cargo
+  ```
+  ```bash
+  # Fedora based
+  sudo dnf install cargo
+  ```
+  ```bash
+  # Debian based
+  sudo apt install cargo
+  ```
+- Then clone, build, and install
+  ```bash
+  # Clone the repository
+  git clone https://github.com/shreyanth-sureshkrishnaa/pyroclear.git
+  cd pyroclear
+  
+  # Build and install (installs to your Cargo bin folder, e.g. ~/.cargo/bin)
+  cargo build --release
+  cargo install --path .
+  ```
 
 Install via NixOS Flakes:
 
@@ -125,6 +138,12 @@ platform. Otherwise the home directory is resolved from `%USERPROFILE%` on Windo
 (falling back to `%HOMEDRIVE%%HOMEPATH%`, then `$HOME`) and from `$HOME` elsewhere.
 
 Run `pyroclear --help` to print the exact config path being used on your machine.
+
+You can change them by running:
+```bash
+pyroclear -s
+```
+or by editing the config file (See the [formatting documentation](formatting.md))
 
 ---
 
