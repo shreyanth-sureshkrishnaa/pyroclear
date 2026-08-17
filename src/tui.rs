@@ -461,6 +461,8 @@ fn draw_settings(selected: usize, settings: &AnimSettings, (cols, rows): (usize,
         " ".repeat(gap)
     );
 
+    let anim_dur = format!("{:.1} seconds", settings.duration);
+
     let items = [
         (
             "FPS / Speed    ",
@@ -518,15 +520,7 @@ fn draw_settings(selected: usize, settings: &AnimSettings, (cols, rows): (usize,
         ),
         (
             "Animation Duration   ",
-            match settings.duration {
-                0.1..0.5 => "0.1 - 0.5 seconds",
-                0.5..1.0 => "0.5 - 1 seconds",
-                1.0..2.0 => "1 - 2 seconds",
-                2.0..3.0 => "1 - 2 seconds",
-                3.0..4.0 => "1 - 2 seconds",
-                4.0..5.0 => "1 - 2 seconds",
-                _ => "Unknown value"
-            },
+            anim_dur.as_str(),
         ),
     ];
 
@@ -631,11 +625,8 @@ pub fn interactive_settings(current: &AnimSettings) -> Option<AnimSettings> {
                     }
                 }
                 5 => {
-                    settings.duration = if settings.duration > 0.2 {
-                        settings.duration - 0.1
-                    } else {
-                        0.1
-                    }
+                    let next = ((settings.duration - 0.1) * 10.0).round() / 10.0;
+                    settings.duration = if next >= 0.1 { next } else { 5.0 };
                 }
                 _ => {}
             },
@@ -676,11 +667,8 @@ pub fn interactive_settings(current: &AnimSettings) -> Option<AnimSettings> {
                     }
                 }
                 5 => {
-                    settings.duration = if settings.duration < 5.0 {
-                        settings.duration + 0.1
-                    } else {
-                        0.1
-                    }
+                    let next = ((settings.duration + 0.1) * 10.0).round() / 10.0;
+                    settings.duration = if next <= 5.0 { next } else { 0.1 };
                 }
                 _ => {}
             },
