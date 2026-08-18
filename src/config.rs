@@ -357,8 +357,8 @@ pub fn build_palette(choice: &PaletteChoice) -> Palette {
 
 // ── CLI argument parsing ──────────────────────────────────────────────
 
-/// Parse CLI flags. Returns (parsed palette choice, run_settings flag, is_reset flag).
-fn parse_args() -> (Option<PaletteChoice>, bool, bool) {
+/// Parse CLI flags. Returns (parsed palette choice, optional overridden settings, run_settings flag, is_reset flag).
+fn parse_args(saved_settings: &AnimSettings) -> (Option<PaletteChoice>, Option<AnimSettings>, bool, bool) {
     use crate::display::*;
 
     let args: Vec<String> = std::env::args().collect();
@@ -383,8 +383,8 @@ fn parse_args() -> (Option<PaletteChoice>, bool, bool) {
                 i += 1;
                 to = args.get(i).cloned();
             }
-            "--pick" | "-p" => match interactive_pick() {
-                Some(c) => return (Some(c), false, false),
+            "--pick" | "-p" => match interactive_pick(saved_settings.clone()) {
+                Some((c, new_settings)) => return (Some(c), Some(new_settings), false, false),
                 None => std::process::exit(0),
             },
             "--settings" | "-s" => {
@@ -392,13 +392,13 @@ fn parse_args() -> (Option<PaletteChoice>, bool, bool) {
             }
             "--random" | "-r" => {
                 let c = random_palette_choice();
-                return (Some(c), false, false);
+                return (Some(c), None, false, false);
             }
             "--reset" => {
                 is_reset = true;
             }
-            "--custom" => match interactive_custom() {
-                Some(c) => return (Some(c), false, false),
+            "--custom" => match interactive_custom(saved_settings.clone()) {
+                Some((c, new_settings)) => return (Some(c), Some(new_settings), false, false),
                 None => std::process::exit(0),
             },
             "--start" => {
@@ -438,7 +438,7 @@ fn parse_args() -> (Option<PaletteChoice>, bool, bool) {
             );
             std::process::exit(1);
         };
-        return (Some(PaletteChoice::Custom { from: fc, to: tc }), false, false);
+        return (Some(PaletteChoice::Custom { from: fc, to: tc }), None, false, false);
     }
 
     if let Some(name) = color {
@@ -449,16 +449,16 @@ fn parse_args() -> (Option<PaletteChoice>, bool, bool) {
             );
             std::process::exit(1);
         }
-        return (Some(PaletteChoice::Named(name)), false, false);
+        return (Some(PaletteChoice::Named(name)), None, false, false);
     }
 
-    (None, run_settings, is_reset)
+    (None, None, run_settings, is_reset)
 }
 
 /// Resolve the final (palette choice, animation settings) pair for this run.
 pub fn resolve_choice() -> (PaletteChoice, AnimSettings) {
     let (saved_choice, saved_settings) = load_config();
-    let (parsed_choice, run_settings, is_reset) = parse_args();
+    let (parsed_choice, parsed_settings, run_settings, is_reset) = parse_args(&saved_settings);
 
     if is_reset {
         let c = PaletteChoice::Named("fire".to_string());
@@ -473,7 +473,8 @@ pub fn resolve_choice() -> (PaletteChoice, AnimSettings) {
         return (c, default_settings);
     }
 
-    let mut settings = saved_settings;
+    // Settings returned from the TUI (--pick, --custom) take priority over saved settings.
+    let mut settings = parsed_settings.unwrap_or(saved_settings);
 
     if run_settings {
         if let Some(new_settings) = interactive_settings(&settings) {

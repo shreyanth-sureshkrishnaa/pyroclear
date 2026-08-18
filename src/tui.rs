@@ -72,6 +72,7 @@ pub enum Key {
     Char(char),
     Esc,
     Backspace,
+    Tab,
     Other,
 }
 
@@ -91,10 +92,12 @@ pub fn read_key() -> Key {
         [0x1b, ..] if n == 1 => Key::Esc,
         [0x0d] | [0x0a] => Key::Enter,
         [0x7f] | [0x08] => Key::Backspace,
+        [0x09] => Key::Tab,
         [c] if *c >= 0x20 && *c < 0x7f => Key::Char(*c as char),
         _ => Key::Other,
     }
 }
+
 
 // ── Hex prompt ────────────────────────────────────────────────────────
 
@@ -250,59 +253,62 @@ impl PreviewFire {
         if self.grid.is_empty() {
             return;
         }
-        // set heat source
-        let source_row = if settings.direction { 0 } else { self.rows - 1 };
-        for x in 0..self.cols {
-            self.grid[source_row * self.cols + x] = 36;
-        }
-
-        // propagate heat
-        if settings.direction {
+        // Run 2 propagation steps per tick to match the real fire speed
+        for _ in 0..2 {
+            // set heat source
+            let source_row = if settings.direction { 0 } else { self.rows - 1 };
             for x in 0..self.cols {
-                for y in 0..self.rows - 1 {
-                    let above = self.grid[y * self.cols + x];
-                    let decay = match settings.height {
-                        0 => rng.range(1, 4),
-                        1 => rng.range(0, 3),
-                        2 => rng.range(0, 2),
-                        3 => rng.range(0, 1),
-                        _ => rng.range(0, 3),
-                    };
-                    let drift = match settings.wind {
-                        -2 => rng.range(-2, 0),
-                        -1 => rng.range(-1, 0),
-                        0 => rng.range(-1, 1),
-                        1 => rng.range(0, 1),
-                        2 => rng.range(0, 2),
-                        _ => rng.range(-1, 1),
-                    };
-                    let nx = (x as i32 + drift).clamp(0, self.cols as i32 - 1) as usize;
-                    let new_val = (above as i32 - decay).max(0) as u8;
-                    self.grid[(y + 1) * self.cols + nx] = new_val;
-                }
+                self.grid[source_row * self.cols + x] = 36;
             }
-        } else {
-            for x in 0..self.cols {
-                for y in 1..self.rows {
-                    let below = self.grid[y * self.cols + x];
-                    let decay = match settings.height {
-                        0 => rng.range(1, 4),
-                        1 => rng.range(0, 3),
-                        2 => rng.range(0, 2),
-                        3 => rng.range(0, 1),
-                        _ => rng.range(0, 3),
-                    };
-                    let drift = match settings.wind {
-                        -2 => rng.range(-2, 0),
-                        -1 => rng.range(-1, 0),
-                        0 => rng.range(-1, 1),
-                        1 => rng.range(0, 1),
-                        2 => rng.range(0, 2),
-                        _ => rng.range(-1, 1),
-                    };
-                    let nx = (x as i32 + drift).clamp(0, self.cols as i32 - 1) as usize;
-                    let new_val = (below as i32 - decay).max(0) as u8;
-                    self.grid[(y - 1) * self.cols + nx] = new_val;
+
+            // propagate heat
+            if settings.direction {
+                for x in 0..self.cols {
+                    for y in 0..self.rows - 1 {
+                        let above = self.grid[y * self.cols + x];
+                        let decay = match settings.height {
+                            0 => rng.range(1, 4),
+                            1 => rng.range(0, 3),
+                            2 => rng.range(0, 2),
+                            3 => rng.range(0, 1),
+                            _ => rng.range(0, 3),
+                        };
+                        let drift = match settings.wind {
+                            -2 => rng.range(-2, 0),
+                            -1 => rng.range(-1, 0),
+                            0 => rng.range(-1, 1),
+                            1 => rng.range(0, 1),
+                            2 => rng.range(0, 2),
+                            _ => rng.range(-1, 1),
+                        };
+                        let nx = (x as i32 + drift).clamp(0, self.cols as i32 - 1) as usize;
+                        let new_val = (above as i32 - decay).max(0) as u8;
+                        self.grid[(y + 1) * self.cols + nx] = new_val;
+                    }
+                }
+            } else {
+                for x in 0..self.cols {
+                    for y in 1..self.rows {
+                        let below = self.grid[y * self.cols + x];
+                        let decay = match settings.height {
+                            0 => rng.range(1, 4),
+                            1 => rng.range(0, 3),
+                            2 => rng.range(0, 2),
+                            3 => rng.range(0, 1),
+                            _ => rng.range(0, 3),
+                        };
+                        let drift = match settings.wind {
+                            -2 => rng.range(-2, 0),
+                            -1 => rng.range(-1, 0),
+                            0 => rng.range(-1, 1),
+                            1 => rng.range(0, 1),
+                            2 => rng.range(0, 2),
+                            _ => rng.range(-1, 1),
+                        };
+                        let nx = (x as i32 + drift).clamp(0, self.cols as i32 - 1) as usize;
+                        let new_val = (below as i32 - decay).max(0) as u8;
+                        self.grid[(y - 1) * self.cols + nx] = new_val;
+                    }
                 }
             }
         }
@@ -312,12 +318,25 @@ impl PreviewFire {
         let mut lines = Vec::with_capacity(self.rows);
         for y in 0..self.rows {
             let mut line = String::with_capacity(self.cols * 20);
+            let mut current_bg_color: Option<(u8, u8, u8)> = None;
+            let mut current_is_default = true;
+
             for x in 0..self.cols {
                 let heat = self.grid[y * self.cols + x];
                 if heat > 0 {
-                    let (r, g, b) = palette[heat as usize];
-                    line.push_str(&format!("{ESC}[48;2;{r};{g};{b}m "));
+                    let rgb = palette[heat as usize];
+                    if current_is_default || current_bg_color != Some(rgb) {
+                        line.push_str(&format!("{ESC}[48;2;{r};{g};{b}m", r = rgb.0, g = rgb.1, b = rgb.2));
+                        current_bg_color = Some(rgb);
+                        current_is_default = false;
+                    }
+                    line.push_str(" ");
                 } else {
+                    if !current_is_default {
+                        line.push_str(&format!("{ESC}[49m"));
+                        current_is_default = true;
+                        current_bg_color = None;
+                    }
                     line.push_str(" ");
                 }
             }
@@ -419,6 +438,7 @@ pub fn run_dashboard(
     let mut show_help = false;
     let mut prompt_state: Option<PromptState> = None;
     let mut rng = Rng::new();
+    let mut palette_source_is_custom = false;
 
     // Map selection index back to chosen palette
     let get_current_palette = |sel_idx: usize,
@@ -449,22 +469,28 @@ pub fn run_dashboard(
     let tick_duration = Duration::from_millis(33); // ~30 FPS
 
     // Set initial selection if an initial choice was supplied
-    if let Some(choice) = initial_choice {
+    if let Some(ref choice) = initial_choice {
         match choice {
             PaletteChoice::Named(name) => {
-                if let Some(pos) = NAMED_PALETTES.iter().position(|(id, _, _, _, _)| *id == name) {
+                if let Some(pos) = NAMED_PALETTES.iter().position(|(id, _, _, _, _)| id == name) {
                     selected_palette_idx = pos;
-                } else if let Some(pos) = custom_entries.iter().position(|e| e.name == name) {
+                    palette_source_is_custom = false;
+                } else if let Some(pos) = custom_entries.iter().position(|e| &e.name == name) {
                     selected_custom_idx = pos;
-                    active_tab = 2;
+                    palette_source_is_custom = true;
+                    if start_tab == 0 {
+                        active_tab = 2;
+                    }
                 }
             }
             PaletteChoice::Custom { .. } => {
                 // Custom selection triggers Tab 0 Custom option
                 selected_palette_idx = NAMED_PALETTES.len();
+                palette_source_is_custom = false;
             }
         }
     }
+
 
     loop {
         // 1. Maintain Frame Rate & Tick Animation
@@ -565,9 +591,25 @@ pub fn run_dashboard(
             } else {
                 // Normal Dashboard Mode Keyboard Bindings
                 match key {
-                    Key::Char('1') => active_tab = 0,
-                    Key::Char('2') => active_tab = 1,
-                    Key::Char('3') => active_tab = 2,
+                    Key::Char('1') => {
+                        active_tab = 0;
+                        palette_source_is_custom = false;
+                    }
+                    Key::Char('2') => {
+                        active_tab = 1;
+                    }
+                    Key::Char('3') => {
+                        active_tab = 2;
+                        palette_source_is_custom = true;
+                    }
+                    Key::Tab => {
+                        active_tab = (active_tab + 1) % 3;
+                        if active_tab == 0 {
+                            palette_source_is_custom = false;
+                        } else if active_tab == 2 {
+                            palette_source_is_custom = true;
+                        }
+                    }
                     Key::Char('h') | Key::Char('?') => show_help = true,
                     Key::Esc | Key::Char('q') => return None,
                     Key::Char('/') if active_tab == 0 => {
@@ -578,9 +620,11 @@ pub fn run_dashboard(
                             let filter = apply_filter(&search_query);
                             if !filter.is_empty() {
                                 selected_palette_idx = (rng.next_u64() % filter.len() as u64) as usize;
+                                palette_source_is_custom = false;
                             }
                         } else if active_tab == 2 && !custom_entries.is_empty() {
                             selected_custom_idx = (rng.next_u64() % custom_entries.len() as u64) as usize;
+                            palette_source_is_custom = true;
                         }
                     }
                     Key::Char('n') | Key::Char('N') if active_tab == 2 => {
@@ -592,8 +636,10 @@ pub fn run_dashboard(
                             to: String::new(),
                             input_buffer: String::new(),
                         });
+                        palette_source_is_custom = true;
                     }
                     Key::Char('d') | Key::Char('D') if active_tab == 2 => {
+                        palette_source_is_custom = true;
                         if !custom_entries.is_empty() && selected_custom_idx < custom_entries.len() {
                             custom_entries.remove(selected_custom_idx);
                             crate::config::save_custom_palettes(&custom_entries);
@@ -603,9 +649,15 @@ pub fn run_dashboard(
                         }
                     }
                     Key::Up => match active_tab {
-                        0 => selected_palette_idx = selected_palette_idx.saturating_sub(1),
+                        0 => {
+                            selected_palette_idx = selected_palette_idx.saturating_sub(1);
+                            palette_source_is_custom = false;
+                        }
                         1 => selected_setting_idx = selected_setting_idx.saturating_sub(1),
-                        2 => selected_custom_idx = selected_custom_idx.saturating_sub(1),
+                        2 => {
+                            selected_custom_idx = selected_custom_idx.saturating_sub(1);
+                            palette_source_is_custom = true;
+                        }
                         _ => {}
                     },
                     Key::Down => match active_tab {
@@ -614,6 +666,7 @@ pub fn run_dashboard(
                             if !filter.is_empty() && selected_palette_idx + 1 < filter.len() {
                                 selected_palette_idx += 1;
                             }
+                            palette_source_is_custom = false;
                         }
                         1 => {
                             if selected_setting_idx < 5 {
@@ -624,12 +677,19 @@ pub fn run_dashboard(
                             if !custom_entries.is_empty() && selected_custom_idx + 1 < custom_entries.len() {
                                 selected_custom_idx += 1;
                             }
+                            palette_source_is_custom = true;
                         }
                         _ => {}
                     },
                     Key::PageUp => match active_tab {
-                        0 => selected_palette_idx = selected_palette_idx.saturating_sub(10),
-                        2 => selected_custom_idx = selected_custom_idx.saturating_sub(10),
+                        0 => {
+                            selected_palette_idx = selected_palette_idx.saturating_sub(10);
+                            palette_source_is_custom = false;
+                        }
+                        2 => {
+                            selected_custom_idx = selected_custom_idx.saturating_sub(10);
+                            palette_source_is_custom = true;
+                        }
                         _ => {}
                     },
                     Key::PageDown => match active_tab {
@@ -638,11 +698,13 @@ pub fn run_dashboard(
                             if !filter.is_empty() {
                                 selected_palette_idx = (selected_palette_idx + 10).min(filter.len() - 1);
                             }
+                            palette_source_is_custom = false;
                         }
                         2 => {
                             if !custom_entries.is_empty() {
                                 selected_custom_idx = (selected_custom_idx + 10).min(custom_entries.len() - 1);
                             }
+                            palette_source_is_custom = true;
                         }
                         _ => {}
                     },
@@ -732,9 +794,24 @@ pub fn run_dashboard(
                                 }
                             }
                             1 => {
-                                // Settings save & run
-                                let (name, _, _, _) = get_current_palette(selected_palette_idx, &search_query, &custom_entries);
-                                return Some((PaletteChoice::Named(name), settings));
+                                // Settings save & run - resolve correct palette target
+                                if palette_source_is_custom {
+                                    if !custom_entries.is_empty() && selected_custom_idx < custom_entries.len() {
+                                        let entry = &custom_entries[selected_custom_idx];
+                                        if let Some(choice) = entry.to_palette_choice() {
+                                            return Some((choice, settings));
+                                        }
+                                    }
+                                } else {
+                                    let filter = apply_filter(&search_query);
+                                    if let Some(&fi) = filter.get(selected_palette_idx) {
+                                        if fi < NAMED_PALETTES.len() {
+                                            let (id, _, _, _, _) = NAMED_PALETTES[fi];
+                                            return Some((PaletteChoice::Named(id.to_string()), settings));
+                                        }
+                                    }
+                                }
+                                return Some((PaletteChoice::Named("fire".to_string()), settings));
                             }
                             2 => {
                                 // Custom list confirm
@@ -1095,12 +1172,13 @@ pub fn run_dashboard(
             let specs_box_h = body_h.saturating_sub(prev_box_h + 2);
 
 
-            // Dynamic live fire preview tick & render
-            let (preview_id, preview_disp, preview_fh, preview_th) = if active_tab == 2 && !custom_entries.is_empty() && selected_custom_idx < custom_entries.len() {
+            // Dynamic live fire preview tick & render based on active source type
+            let (preview_id, preview_disp, preview_fh, preview_th) = if palette_source_is_custom && !custom_entries.is_empty() && selected_custom_idx < custom_entries.len() {
                 let entry = &custom_entries[selected_custom_idx];
                 ("custom".to_string(), entry.display.clone(), entry.from.clone(), entry.to.clone())
             } else {
                 get_current_palette(selected_palette_idx, &search_query, &custom_entries)
+
             };
 
             let preview_pal = if preview_id == "fire" {
@@ -1275,13 +1353,12 @@ pub fn run_dashboard(
 
 // ── Obsolete shims wrapping the new unified dashboard ─────────────────
 
-pub fn interactive_pick() -> Option<PaletteChoice> {
-    let (_, current_settings) = crate::config::load_config();
+pub fn interactive_pick(current_settings: AnimSettings) -> Option<(PaletteChoice, AnimSettings)> {
     if let Some((new_choice, new_settings)) = run_dashboard(0, None, current_settings) {
         if !crate::config::has_no_save() {
             crate::config::save_config(&new_choice, &new_settings);
         }
-        Some(new_choice)
+        Some((new_choice, new_settings))
     } else {
         None
     }
@@ -1300,13 +1377,12 @@ pub fn interactive_settings(current: &AnimSettings) -> Option<AnimSettings> {
     }
 }
 
-pub fn interactive_custom() -> Option<PaletteChoice> {
-    let (_, current_settings) = crate::config::load_config();
+pub fn interactive_custom(current_settings: AnimSettings) -> Option<(PaletteChoice, AnimSettings)> {
     if let Some((new_choice, new_settings)) = run_dashboard(2, None, current_settings) {
         if !crate::config::has_no_save() {
             crate::config::save_config(&new_choice, &new_settings);
         }
-        Some(new_choice)
+        Some((new_choice, new_settings))
     } else {
         None
     }

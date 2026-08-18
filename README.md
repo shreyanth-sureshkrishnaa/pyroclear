@@ -2,7 +2,7 @@
 
 A terminal `clear` replacement that burns your screen down before wiping it. 
 
-Written in modern Rust. Zero runtime dependencies beyond standard `libc` (Unix) or native Win32 API calls (Windows). Highly optimized, flicker-free, and customizable.
+Written in modern Rust. Zero runtime dependencies beyond standard `libc` (Unix) or native Win32 API calls (Windows). Highly optimized, flicker-free, and customizable!
 
 ---
 
