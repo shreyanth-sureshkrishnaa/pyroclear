@@ -1364,14 +1364,14 @@ pub fn interactive_pick(current_settings: AnimSettings) -> Option<(PaletteChoice
     }
 }
 
-pub fn interactive_settings(current: &AnimSettings) -> Option<AnimSettings> {
+pub fn interactive_settings(current: &AnimSettings) -> Option<(PaletteChoice, AnimSettings)> {
     let (saved_choice, _) = crate::config::load_config();
     let choice = saved_choice.unwrap_or(PaletteChoice::Named("fire".to_string()));
     if let Some((new_choice, new_settings)) = run_dashboard(1, Some(choice), current.clone()) {
         if !crate::config::has_no_save() {
             crate::config::save_config(&new_choice, &new_settings);
         }
-        Some(new_settings)
+        Some((new_choice, new_settings))
     } else {
         None
     }

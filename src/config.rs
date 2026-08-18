@@ -475,23 +475,18 @@ pub fn resolve_choice() -> (PaletteChoice, AnimSettings) {
 
     // Settings returned from the TUI (--pick, --custom) take priority over saved settings.
     let mut settings = parsed_settings.unwrap_or(saved_settings);
+    let mut choice_opt = parsed_choice;
 
     if run_settings {
-        if let Some(new_settings) = interactive_settings(&settings) {
+        if let Some((new_choice, new_settings)) = interactive_settings(&settings) {
             settings = new_settings;
-            if !has_no_save() {
-                let active_choice = parsed_choice
-                    .clone()
-                    .or_else(|| saved_choice.clone())
-                    .unwrap_or(PaletteChoice::Named("fire".to_string()));
-                save_config(&active_choice, &settings);
-            }
+            choice_opt = Some(new_choice);
         } else {
             std::process::exit(0);
         }
     }
 
-    if let Some(choice) = parsed_choice {
+    if let Some(choice) = choice_opt {
         if !has_no_save() {
             save_config(&choice, &settings);
         }
