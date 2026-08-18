@@ -10,7 +10,6 @@ Written in modern Rust. Zero runtime dependencies beyond standard `libc` (Unix) 
 
 - **Platform Native**: Native Unix support (via direct `ioctl` syscalls and `termios` configuration) and native Windows support (via hand-rolled Win32 console API bindings for raw mode, virtual terminal processing, and console control handlers). Zero third-party runtime dependencies.
 - **Transparent Background**: Empty cells inherit your terminal's default theme/opacity instead of drawing solid black rectangles.
-- **300+ Built-in Palettes**: Categorized beautifully in `--list-colors` with aligned swatches.
 - **Interactive TUIs**:
   - **Color Picker (`--pick`)**: Browse, search, filter, and preview palettes in real-time.
   - **Settings Manager (`--settings`)**: Adjust FPS, wind/drift, and flame height in raw mode.
@@ -118,7 +117,6 @@ pyroclear [OPTIONS]
 | **`--custom`** | TUI to save, name, manage and run custom gradients | `pyroclear --custom` |
 | **`--color <name>`** | Burn with a specific named palette (saves as default) | `pyroclear --color toxic` |
 | **`--from <hex> --to <hex>`**| Burn with a one-off custom gradient | `pyroclear --from "#002080" --to "#00f0ff"` |
-| **`--list-colors`** | View all 300+ palettes grouped by color family | `pyroclear --list-colors` |
 | **`--info`, `-i`** | Display active palette card and configured options | `pyroclear --info` |
 | **`--random`, `-r`** | Run with a random palette every time | `pyroclear --random` |
 | **`--no-save`** | Run choice without saving it to configuration | `pyroclear --color ocean --no-save` |
