@@ -466,7 +466,6 @@ pub fn run_dashboard(
     let (mut cols, mut rows) = terminal_size();
     let mut preview_fire = PreviewFire::new(10, 10);
     let mut last_tick = Instant::now();
-    let tick_duration = Duration::from_millis(33); // ~30 FPS
 
     // Set initial selection if an initial choice was supplied
     if let Some(ref choice) = initial_choice {
@@ -494,6 +493,7 @@ pub fn run_dashboard(
 
     loop {
         // 1. Maintain Frame Rate & Tick Animation
+        let tick_duration = Duration::from_micros(1_000_000 / settings.fps.max(5) as u64);
         let now = Instant::now();
         let elapsed = now.duration_since(last_tick);
         let timeout = if elapsed >= tick_duration {
