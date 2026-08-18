@@ -383,10 +383,6 @@ fn parse_args() -> (Option<PaletteChoice>, bool, bool) {
                 i += 1;
                 to = args.get(i).cloned();
             }
-            "--list-colors" | "--list" => {
-                print_color_list();
-                std::process::exit(0);
-            }
             "--pick" | "-p" => match interactive_pick() {
                 Some(c) => return (Some(c), false, false),
                 None => std::process::exit(0),
@@ -449,7 +445,7 @@ fn parse_args() -> (Option<PaletteChoice>, bool, bool) {
         if let Err(e) = validate_named(&name) {
             eprintln!(
                 "{ESC}[1;38;2;255;70;70m✗ error:{ESC}[0m {e}\n\
-                 {ESC}[38;2;95;95;115m  tip: run --list-colors or --pick to browse all palettes{ESC}[0m"
+                 {ESC}[38;2;95;95;115m  tip: run pyroclear --pick to browse all palettes{ESC}[0m"
             );
             std::process::exit(1);
         }

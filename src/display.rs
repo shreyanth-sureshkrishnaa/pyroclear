@@ -117,7 +117,6 @@ pub fn print_help() {
     }
 
     print_banner();
-    let n = NAMED_PALETTES.len();
 
     sec("USAGE");
     println!("    {ESC}[38;2;200;200;220mpyroclear {ESC}[38;2;130;130;155m[OPTIONS]{ESC}[0m");
@@ -145,10 +144,8 @@ pub fn print_help() {
     }
 
     sec("DISCOVERY");
-    let list_desc = format!("Palette grid ({n} palettes) with live swatches");
     let disc: &[(&str, &str)] = &[
         ("--start", "Premium onboarding guide & setup"),
-        ("--list-colors, --list", list_desc.as_str()),
         ("--info, -i", "Info card for the currently active palette"),
         ("--version, -V", "Version and palette count"),
         ("--help, -h", "Show this help"),
@@ -187,7 +184,6 @@ pub fn print_help() {
             "one-off, no config change",
         ),
         ("pyroclear --info", "show active palette card"),
-        ("pyroclear --list-colors | less -R", "browse all palettes"),
     ];
     for (cmd, note) in ex {
         println!(
@@ -247,65 +243,4 @@ pub fn print_start() {
     println!(
         "\n  {ESC}[38;2;90;90;110mFor full flag documentation, run: pyroclear --help{ESC}[0m\n"
     );
-}
-
-// ── Color list ────────────────────────────────────────────────────────
-
-pub fn print_color_list() {
-    print_banner();
-    let (cols, _) = crate::engine::terminal_size();
-    let n = NAMED_PALETTES.len();
-    let two_col = cols >= 132;
-    let id_w = 18usize;
-    let sw_w = if two_col { 20usize } else { 28usize };
-
-    let rule = "─".repeat(cols.saturating_sub(26));
-    println!("  {ESC}[1;38;2;255;200;80m{n} palettes available{ESC}[0m  {ESC}[38;2;45;45;65m{rule}{ESC}[0m\n");
-
-    for &(cat_name, start, end) in CATEGORIES {
-        let count = end - start;
-        let rl = cols.saturating_sub(cat_name.len() + 14);
-        println!(
-            "  {ESC}[38;2;255;160;35m▸ {cat_name}{ESC}[0m  \
-             {ESC}[38;2;55;55;75m{count:>3} ╌{}{ESC}[0m",
-            "╌".repeat(rl)
-        );
-
-        let palettes = &NAMED_PALETTES[start..end];
-
-        if two_col {
-            let half = count.div_ceil(2);
-            for row in 0..half {
-                let (id_l, _, _, from_l, to_l) = palettes[row];
-                let sw_l = render_swatch(id_l, from_l, to_l, sw_w);
-                print!(
-                    "  {ESC}[1;38;2;255;225;100m{id_l:<id_w$}{ESC}[0m {sw_l} \
-                     {ESC}[38;2;90;90;112m{from_l}{ESC}[38;2;50;50;70m→{ESC}[38;2;90;90;112m{to_l}{ESC}[0m"
-                );
-                let right = row + half;
-                if right < count {
-                    let (id_r, _, _, from_r, to_r) = palettes[right];
-                    let sw_r = render_swatch(id_r, from_r, to_r, sw_w);
-                    print!(
-                        "    {ESC}[1;38;2;255;225;100m{id_r:<id_w$}{ESC}[0m {sw_r} \
-                         {ESC}[38;2;90;90;112m{from_r}{ESC}[38;2;50;50;70m→{ESC}[38;2;90;90;112m{to_r}{ESC}[0m"
-                    );
-                }
-                println!();
-            }
-        } else {
-            for (id, _, desc, from_hex, to_hex) in palettes {
-                let sw = render_swatch(id, from_hex, to_hex, sw_w);
-                println!(
-                    "  {ESC}[1;38;2;255;225;100m{id:<id_w$}{ESC}[0m {sw}  \
-                     {ESC}[38;2;125;125;148m{desc}{ESC}[0m"
-                );
-            }
-        }
-        println!();
-    }
-
-    println!("  {ESC}[38;2;75;75;95m╌╌ Custom:      pyroclear --from \"#rrggbb\" --to \"#rrggbb\"{ESC}[0m");
-    println!("  {ESC}[38;2;75;75;95m╌╌ Interactive: pyroclear --pick{ESC}[0m");
-    println!("  {ESC}[38;2;75;75;95m╌╌ Random:      pyroclear --random{ESC}[0m\n");
 }

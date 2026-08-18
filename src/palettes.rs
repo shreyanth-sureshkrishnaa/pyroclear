@@ -3748,47 +3748,6 @@ pub const NAMED_PALETTES: &[(&str, &str, &str, &str, &str)] = &[
     ),
 ];
 
-// ── Category definitions for --list-colors ────────────────────────────
-
-pub const CATEGORIES: &[(&str, usize, usize)] = &[
-    ("Originals", 0, 103),
-    ("Reds", 103, 119),
-    ("Oranges", 119, 135),
-    ("Yellows", 135, 151),
-    ("Greens", 151, 168),
-    ("Teals & Cyan", 168, 185),
-    ("Blues", 185, 202),
-    ("Violets", 202, 219),
-    ("Magentas", 219, 236),
-    ("Earth Tones", 236, 253),
-    ("Grays", 253, 263),
-    ("Jewels", 263, 273),
-    ("Cosmic", 273, 283),
-    ("Food & Fun", 283, 293),
-    ("Misc", 293, 301),
-    ("Neon Synthwave", 301, 321),
-    ("Deep Dark", 321, 331),
-    ("Pastels", 331, 346),
-    ("Metallic", 346, 358),
-    ("Bioluminescent", 358, 368),
-    ("Geological", 368, 380),
-    ("Mythological", 380, 392),
-    ("Weather", 392, 402),
-    ("Exotic Food", 402, 414),
-    ("Landscapes", 414, 426),
-    ("Celestial", 426, 436),
-    ("Art Movements", 436, 446),
-    ("Seasons", 446, 454),
-    ("Music", 454, 464),
-    ("Cultural", 464, 474),
-    ("Elements", 474, 484),
-    ("Time of Day", 484, 494),
-    ("Temperature", 494, 504),
-    ("Emotive", 504, 514),
-    ("Inverted", 514, 524),
-    ("Extras", 524, 529),
-];
-
 // ── Color math ────────────────────────────────────────────────────────
 
 pub fn hex_to_rgb(hex: &str) -> Option<(u8, u8, u8)> {

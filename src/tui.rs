@@ -187,37 +187,35 @@ fn draw_picker(
 ) {
     let sw_w = (cols.saturating_sub(50)).clamp(10, 30);
 
+    // Accumulate everything into one buffer and flush once — eliminates flicker on scroll.
+    let mut buf = String::with_capacity(cols * rows * 32);
+
     // Row 1: title bar
-    print!("{ESC}[1;1H");
     let title = " pyroclear  ◆  color picker ";
     let gap = cols.saturating_sub(title.len());
-    print!(
-        "{ESC}[48;2;20;20;36m{ESC}[38;2;255;200;80m{title}\
+    buf.push_str(&format!(
+        "{ESC}[1;1H{ESC}[48;2;20;20;36m{ESC}[38;2;255;200;80m{title}\
          {ESC}[38;2;50;50;72m{}{ESC}[0m",
         " ".repeat(gap)
-    );
+    ));
 
     // Row 2: search bar
-    print!("{ESC}[2;1H{ESC}[2K");
     let match_count = filter.iter().filter(|&&i| i < NAMED_PALETTES.len()).count();
+    buf.push_str(&format!("{ESC}[2;1H{ESC}[2K"));
     if search.is_empty() && !search_active {
-        print!(
+        buf.push_str(&format!(
             "  {ESC}[38;2;55;55;78m/{ESC}[0m \
              {ESC}[38;2;52;52;72msearch palettes...{ESC}[0m  \
              {ESC}[38;2;52;52;72m{match_count} palettes{ESC}[0m"
-        );
+        ));
     } else {
         let caret = if search_active { "_" } else { "" };
-        let col = if search_active {
-            "255;220;80"
-        } else {
-            "150;150;180"
-        };
-        print!(
+        let col = if search_active { "255;220;80" } else { "150;150;180" };
+        buf.push_str(&format!(
             "  {ESC}[38;2;{col}m/{search}{caret}{ESC}[0m  \
              {ESC}[38;2;95;95;115m{match_count} match{}{ESC}[0m",
             if match_count == 1 { "" } else { "es" }
-        );
+        ));
     }
 
     // Palette list
@@ -233,7 +231,7 @@ fn draw_picker(
     for slot in 0..visible {
         let fi_pos = slot + offset;
         let row = (list_start + slot + 1) as u16;
-        print!("{ESC}[{row};1H{ESC}[2K");
+        buf.push_str(&format!("{ESC}[{row};1H{ESC}[2K"));
         if fi_pos >= filter.len() {
             continue;
         }
@@ -243,7 +241,7 @@ fn draw_picker(
         let cursor = if is_sel { "▸" } else { " " };
 
         if is_sel {
-            print!("{ESC}[48;2;20;26;46m");
+            buf.push_str(&format!("{ESC}[48;2;20;26;46m"));
         }
 
         let (name_str, desc_str, sw_str, fhex, thex) = if fi < NAMED_PALETTES.len() {
@@ -271,19 +269,19 @@ fn draw_picker(
         };
 
         if is_sel {
-            print!("{ESC}[1;38;2;255;230;100m");
+            buf.push_str(&format!("{ESC}[1;38;2;255;230;100m"));
         } else {
-            print!("{ESC}[38;2;178;178;205m");
+            buf.push_str(&format!("{ESC}[38;2;178;178;205m"));
         }
 
-        print!("  {cursor} {name_str:<18}  {sw_str}");
+        buf.push_str(&format!("  {cursor} {name_str:<18}  {sw_str}"));
 
         if fi < NAMED_PALETTES.len() {
-            print!(
+            buf.push_str(&format!(
                 "  {ESC}[38;2;82;82;108m{fhex}\
                  {ESC}[38;2;48;48;68m→\
                  {ESC}[38;2;82;82;108m{thex}{ESC}[0m"
-            );
+            ));
         }
 
         let used_approx = 4 + 18 + 2 + sw_w + 2 + 17;
@@ -291,23 +289,23 @@ fn draw_picker(
             let max_d = cols.saturating_sub(used_approx + 4);
             let td = truncate_display(desc_str, max_d);
             let dc = if is_sel { "140;140;172" } else { "62;62;82" };
-            print!("  {ESC}[38;2;{dc}m{td}{ESC}[0m");
+            buf.push_str(&format!("  {ESC}[38;2;{dc}m{td}{ESC}[0m"));
         }
 
-        print!("{ESC}[0m");
+        buf.push_str(&format!("{ESC}[0m"));
     }
 
     // Separator
     let sep_row = (list_end + 1) as u16;
-    print!(
+    buf.push_str(&format!(
         "{ESC}[{sep_row};1H{ESC}[2K\
          {ESC}[38;2;35;35;55m{}{ESC}[0m",
         "─".repeat(cols)
-    );
+    ));
 
     // Preview swatch for selected entry
     let prev_row = (rows - 2) as u16;
-    print!("{ESC}[{prev_row};1H{ESC}[2K");
+    buf.push_str(&format!("{ESC}[{prev_row};1H{ESC}[2K"));
     if let Some(&fi) = filter.get(selected) {
         if fi < NAMED_PALETTES.len() {
             let (id, display, _, fh, th) = NAMED_PALETTES[fi];
@@ -324,17 +322,21 @@ fn draw_picker(
             };
             let pw = cols.saturating_sub(22).min(72);
             let ps = palette_swatch(&p, pw);
-            print!("  {ESC}[38;2;92;92;115m▸ {ESC}[38;2;172;172;198m{display:<16}{ESC}[0m  {ps}");
+            buf.push_str(&format!(
+                "  {ESC}[38;2;92;92;115m▸ {ESC}[38;2;172;172;198m{display:<16}{ESC}[0m  {ps}"
+            ));
         } else {
-            print!("  {ESC}[38;2;92;92;115m▸ Custom gradient — press Enter to configure{ESC}[0m");
+            buf.push_str(&format!(
+                "  {ESC}[38;2;92;92;115m▸ Custom gradient — press Enter to configure{ESC}[0m"
+            ));
         }
     }
 
-    // Key hints
+    // Key hints — folded into buf so the whole frame is one atomic write.
     let hint_row = rows as u16;
-    print!("{ESC}[{hint_row};1H{ESC}[2K");
-    print!(
-        "{ESC}[48;2;15;15;28m \
+    buf.push_str(&format!(
+        "{ESC}[{hint_row};1H{ESC}[2K\
+         {ESC}[48;2;15;15;28m \
          {ESC}[38;2;255;200;80m↑↓{ESC}[38;2;98;98;128m move  \
          {ESC}[38;2;255;200;80mPgUp/Dn{ESC}[38;2;98;98;128m page  \
          {ESC}[38;2;255;200;80m/{ESC}[38;2;98;98;128m search  \
@@ -342,10 +344,13 @@ fn draw_picker(
          {ESC}[38;2;255;200;80mEnter{ESC}[38;2;98;98;128m select  \
          {ESC}[38;2;255;200;80mEsc{ESC}[38;2;98;98;128m·{ESC}[38;2;255;200;80mq{ESC}[38;2;98;98;128m quit \
          {ESC}[0m"
-    );
+    ));
 
+    // Single atomic write — no partial frame ever visible.
+    print!("{buf}");
     io::stdout().flush().ok();
 }
+
 
 // ── Interactive picker ────────────────────────────────────────────────
 
