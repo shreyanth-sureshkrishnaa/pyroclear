@@ -7,7 +7,8 @@ use crate::{
     ESC,
 };
 use std::io::{self, Read, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
 
 // ── Raw terminal guard ────────────────────────────────────────────────
 
@@ -176,725 +177,1138 @@ fn apply_filter(search: &str) -> Vec<usize> {
     v
 }
 
-// ── Picker draw ───────────────────────────────────────────────────────
 
-fn draw_picker(
-    selected: usize,
-    filter: &[usize],
-    search: &str,
-    search_active: bool,
-    (cols, rows): (usize, usize),
-) {
-    let sw_w = (cols.saturating_sub(50)).clamp(10, 30);
+#[cfg(unix)]
+fn poll_stdin(timeout: Duration) -> io::Result<bool> {
+    let mut pfd = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let timeout_ms = timeout.as_millis() as libc::c_int;
+    let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    if ret < 0 {
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::Interrupted {
+            return Ok(false);
+        }
+        return Err(err);
+    }
+    Ok(ret > 0 && (pfd.revents & libc::POLLIN) != 0)
+}
 
-    // Accumulate everything into one buffer and flush once — eliminates flicker on scroll.
-    let mut buf = String::with_capacity(cols * rows * 32);
+#[cfg(windows)]
+extern "system" {
+    fn WaitForSingleObject(h_handle: *mut std::ffi::c_void, dw_milliseconds: u32) -> u32;
+    fn GetStdHandle(n_std_handle: u32) -> *mut std::ffi::c_void;
+}
 
-    // Row 1: title bar
-    let title = " pyroclear  ◆  color picker ";
-    let gap = cols.saturating_sub(title.len());
-    buf.push_str(&format!(
-        "{ESC}[1;1H{ESC}[48;2;20;20;36m{ESC}[38;2;255;200;80m{title}\
-         {ESC}[38;2;50;50;72m{}{ESC}[0m",
-        " ".repeat(gap)
-    ));
+#[cfg(windows)]
+const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
+#[cfg(windows)]
+const WAIT_OBJECT_0: u32 = 0x00000000;
 
-    // Row 2: search bar
-    let match_count = filter.iter().filter(|&&i| i < NAMED_PALETTES.len()).count();
-    buf.push_str(&format!("{ESC}[2;1H{ESC}[2K"));
-    if search.is_empty() && !search_active {
-        buf.push_str(&format!(
-            "  {ESC}[38;2;55;55;78m/{ESC}[0m \
-             {ESC}[38;2;52;52;72msearch palettes...{ESC}[0m  \
-             {ESC}[38;2;52;52;72m{match_count} palettes{ESC}[0m"
-        ));
-    } else {
-        let caret = if search_active { "_" } else { "" };
-        let col = if search_active { "255;220;80" } else { "150;150;180" };
-        buf.push_str(&format!(
-            "  {ESC}[38;2;{col}m/{search}{caret}{ESC}[0m  \
-             {ESC}[38;2;95;95;115m{match_count} match{}{ESC}[0m",
-            if match_count == 1 { "" } else { "es" }
-        ));
+#[cfg(windows)]
+fn poll_stdin(timeout: Duration) -> io::Result<bool> {
+    unsafe {
+        let hin = GetStdHandle(STD_INPUT_HANDLE);
+        if hin.is_null() {
+            return Ok(false);
+        }
+        let ms = timeout.as_millis() as u32;
+        let res = WaitForSingleObject(hin, ms);
+        Ok(res == WAIT_OBJECT_0)
+    }
+}
+
+// ── Live Fire Preview State ──────────────────────────────────────────
+
+struct PreviewFire {
+    grid: Vec<u8>,
+    cols: usize,
+    rows: usize,
+}
+
+impl PreviewFire {
+    fn new(cols: usize, rows: usize) -> Self {
+        Self {
+            grid: vec![0; cols * rows],
+            cols,
+            rows,
+        }
     }
 
-    // Palette list
-    let list_start = 2usize;
-    let list_end = rows.saturating_sub(4);
-    let visible = list_end.saturating_sub(list_start);
-    let offset = if selected >= visible {
-        selected - visible + 1
+    fn resize(&mut self, new_cols: usize, new_rows: usize) {
+        if self.cols != new_cols || self.rows != new_rows {
+            self.grid = vec![0; new_cols * new_rows];
+            self.cols = new_cols;
+            self.rows = new_rows;
+        }
+    }
+
+    fn tick(&mut self, settings: &AnimSettings, rng: &mut Rng) {
+        if self.grid.is_empty() {
+            return;
+        }
+        // set heat source
+        let source_row = if settings.direction { 0 } else { self.rows - 1 };
+        for x in 0..self.cols {
+            self.grid[source_row * self.cols + x] = 36;
+        }
+
+        // propagate heat
+        if settings.direction {
+            for x in 0..self.cols {
+                for y in 0..self.rows - 1 {
+                    let above = self.grid[y * self.cols + x];
+                    let decay = match settings.height {
+                        0 => rng.range(1, 4),
+                        1 => rng.range(0, 3),
+                        2 => rng.range(0, 2),
+                        3 => rng.range(0, 1),
+                        _ => rng.range(0, 3),
+                    };
+                    let drift = match settings.wind {
+                        -2 => rng.range(-2, 0),
+                        -1 => rng.range(-1, 0),
+                        0 => rng.range(-1, 1),
+                        1 => rng.range(0, 1),
+                        2 => rng.range(0, 2),
+                        _ => rng.range(-1, 1),
+                    };
+                    let nx = (x as i32 + drift).clamp(0, self.cols as i32 - 1) as usize;
+                    let new_val = (above as i32 - decay).max(0) as u8;
+                    self.grid[(y + 1) * self.cols + nx] = new_val;
+                }
+            }
+        } else {
+            for x in 0..self.cols {
+                for y in 1..self.rows {
+                    let below = self.grid[y * self.cols + x];
+                    let decay = match settings.height {
+                        0 => rng.range(1, 4),
+                        1 => rng.range(0, 3),
+                        2 => rng.range(0, 2),
+                        3 => rng.range(0, 1),
+                        _ => rng.range(0, 3),
+                    };
+                    let drift = match settings.wind {
+                        -2 => rng.range(-2, 0),
+                        -1 => rng.range(-1, 0),
+                        0 => rng.range(-1, 1),
+                        1 => rng.range(0, 1),
+                        2 => rng.range(0, 2),
+                        _ => rng.range(-1, 1),
+                    };
+                    let nx = (x as i32 + drift).clamp(0, self.cols as i32 - 1) as usize;
+                    let new_val = (below as i32 - decay).max(0) as u8;
+                    self.grid[(y - 1) * self.cols + nx] = new_val;
+                }
+            }
+        }
+    }
+
+    fn render_lines(&self, palette: &Palette) -> Vec<String> {
+        let mut lines = Vec::with_capacity(self.rows);
+        for y in 0..self.rows {
+            let mut line = String::with_capacity(self.cols * 20);
+            for x in 0..self.cols {
+                let heat = self.grid[y * self.cols + x];
+                if heat > 0 {
+                    let (r, g, b) = palette[heat as usize];
+                    line.push_str(&format!("{ESC}[48;2;{r};{g};{b}m "));
+                } else {
+                    line.push_str(" ");
+                }
+            }
+            line.push_str(&format!("{ESC}[0m"));
+            lines.push(line);
+        }
+        lines
+    }
+}
+
+// ── Visual Helper Utilities ──────────────────────────────────────────
+
+fn visual_width(s: &str) -> usize {
+    let mut len = 0;
+    let mut in_esc = false;
+    for c in s.chars() {
+        if c == '\x1b' {
+            in_esc = true;
+        } else if in_esc {
+            if c == 'm' || c == 'H' || c == 'J' || c == 'K' {
+                in_esc = false;
+            }
+        } else {
+            len += 1;
+        }
+    }
+    len
+}
+
+fn pad_right(s: &str, width: usize) -> String {
+    let w = visual_width(s);
+    if w >= width {
+        s.to_string()
     } else {
-        0
+        format!("{}{}", s, " ".repeat(width - w))
+    }
+}
+
+// ── Custom Palette Guided Prompt State ────────────────────────────────
+
+#[derive(Clone, PartialEq)]
+enum PromptStep {
+    Slug,
+    Display,
+    From,
+    To,
+}
+
+struct PromptState {
+    step: PromptStep,
+    slug: String,
+    display: String,
+    from: String,
+    to: String,
+    input_buffer: String,
+}
+
+// ── Setting Rows Helper ──────────────────────────────────────────────
+
+fn format_setting_row(label: &str, value: &str, is_selected: bool) -> String {
+    let indicator = if is_selected {
+        format!("{ESC}[1;38;2;255;200;80m▸ {ESC}[0m")
+    } else {
+        "  ".to_string()
+    };
+    let styled_label = if is_selected {
+        format!("{ESC}[1;38;2;255;255;255m{:<18}{ESC}[0m", label)
+    } else {
+        format!("{ESC}[38;2;170;170;190m{:<18}{ESC}[0m", label)
+    };
+    let val_str = if is_selected {
+        format!(
+            "{ESC}[38;2;255;200;80m◀ {ESC}[1;38;2;255;255;255m{:<14}{ESC}[0m{ESC}[38;2;255;200;80m ▶{ESC}[0m",
+            value
+        )
+    } else {
+        format!("  {:<14}  ", value)
+    };
+    pad_right(&format!("{}{}{}", indicator, styled_label, val_str), 42)
+}
+
+// ── Unified Dashboard Runner ──────────────────────────────────────────
+
+pub fn run_dashboard(
+    start_tab: usize,
+    initial_choice: Option<PaletteChoice>,
+    initial_settings: AnimSettings,
+) -> Option<(PaletteChoice, AnimSettings)> {
+    let _guard = TermRawGuard::enter().ok()?;
+
+    let mut active_tab = start_tab.min(2);
+    let mut selected_palette_idx = 0usize;
+    let mut selected_setting_idx = 0usize;
+    let mut selected_custom_idx = 0usize;
+    let mut search_query = String::new();
+    let mut search_active = false;
+    let mut settings = initial_settings;
+    let mut custom_entries = crate::config::load_custom_palettes();
+    let mut show_help = false;
+    let mut prompt_state: Option<PromptState> = None;
+    let mut rng = Rng::new();
+
+    // Map selection index back to chosen palette
+    let get_current_palette = |sel_idx: usize,
+                               query: &str,
+                               custom_list: &[crate::config::CustomPaletteEntry]|
+     -> (String, String, String, String) {
+        let filter = apply_filter(query);
+        if let Some(&fi) = filter.get(sel_idx) {
+            if fi < NAMED_PALETTES.len() {
+                let (id, display, _, fh, th) = NAMED_PALETTES[fi];
+                (id.to_string(), display.to_string(), fh.to_string(), th.to_string())
+            } else {
+                // "Custom" option
+                ("custom".to_string(), "Custom".to_string(), "#32003c".to_string(), "#ffb450".to_string())
+            }
+        } else if !custom_list.is_empty() {
+            // Default fallback if we are out of range
+            ("fire".to_string(), "Fire".to_string(), "#800000".to_string(), "#ffffff".to_string())
+        } else {
+            ("fire".to_string(), "Fire".to_string(), "#800000".to_string(), "#ffffff".to_string())
+        }
     };
 
-    for slot in 0..visible {
-        let fi_pos = slot + offset;
-        let row = (list_start + slot + 1) as u16;
-        buf.push_str(&format!("{ESC}[{row};1H{ESC}[2K"));
-        if fi_pos >= filter.len() {
-            continue;
+    // Pre-calculate preview grid sizing based on starting window size
+    let (mut cols, mut rows) = terminal_size();
+    let mut preview_fire = PreviewFire::new(10, 10);
+    let mut last_tick = Instant::now();
+    let tick_duration = Duration::from_millis(33); // ~30 FPS
+
+    // Set initial selection if an initial choice was supplied
+    if let Some(choice) = initial_choice {
+        match choice {
+            PaletteChoice::Named(name) => {
+                if let Some(pos) = NAMED_PALETTES.iter().position(|(id, _, _, _, _)| *id == name) {
+                    selected_palette_idx = pos;
+                } else if let Some(pos) = custom_entries.iter().position(|e| e.name == name) {
+                    selected_custom_idx = pos;
+                    active_tab = 2;
+                }
+            }
+            PaletteChoice::Custom { .. } => {
+                // Custom selection triggers Tab 0 Custom option
+                selected_palette_idx = NAMED_PALETTES.len();
+            }
         }
+    }
 
-        let fi = filter[fi_pos];
-        let is_sel = fi_pos == selected;
-        let cursor = if is_sel { "▸" } else { " " };
-
-        if is_sel {
-            buf.push_str(&format!("{ESC}[48;2;20;26;46m"));
-        }
-
-        let (name_str, desc_str, sw_str, fhex, thex) = if fi < NAMED_PALETTES.len() {
-            let (id, display, desc, fh, th) = NAMED_PALETTES[fi];
-            let p = if id == "fire" {
-                soften(&FIRE_PALETTE, SOFTEN_DESATURATE, SOFTEN_BRIGHTEN)
-            } else {
-                let from = hex_to_rgb(fh).unwrap_or((0, 0, 0));
-                let to = hex_to_rgb(th).unwrap_or((255, 255, 255));
-                soften(
-                    &generate_palette(from, to),
-                    SOFTEN_DESATURATE,
-                    SOFTEN_BRIGHTEN,
-                )
-            };
-            (display, desc, palette_swatch(&p, sw_w), fh, th)
+    loop {
+        // 1. Maintain Frame Rate & Tick Animation
+        let now = Instant::now();
+        let elapsed = now.duration_since(last_tick);
+        let timeout = if elapsed >= tick_duration {
+            Duration::ZERO
         } else {
-            (
-                "Custom",
-                "enter your own #rrggbb gradient",
-                swatch((50, 0, 60), (255, 180, 80), sw_w),
-                "",
-                "",
-            )
+            tick_duration - elapsed
         };
 
-        if is_sel {
-            buf.push_str(&format!("{ESC}[1;38;2;255;230;100m"));
+        // 2. Poll Non-blocking Stdin
+        let has_input = if timeout.is_zero() {
+            false
         } else {
-            buf.push_str(&format!("{ESC}[38;2;178;178;205m"));
-        }
-
-        buf.push_str(&format!("  {cursor} {name_str:<18}  {sw_str}"));
-
-        if fi < NAMED_PALETTES.len() {
-            buf.push_str(&format!(
-                "  {ESC}[38;2;82;82;108m{fhex}\
-                 {ESC}[38;2;48;48;68m→\
-                 {ESC}[38;2;82;82;108m{thex}{ESC}[0m"
-            ));
-        }
-
-        let used_approx = 4 + 18 + 2 + sw_w + 2 + 17;
-        if cols > used_approx + 6 {
-            let max_d = cols.saturating_sub(used_approx + 4);
-            let td = truncate_display(desc_str, max_d);
-            let dc = if is_sel { "140;140;172" } else { "62;62;82" };
-            buf.push_str(&format!("  {ESC}[38;2;{dc}m{td}{ESC}[0m"));
-        }
-
-        buf.push_str(&format!("{ESC}[0m"));
-    }
-
-    // Separator
-    let sep_row = (list_end + 1) as u16;
-    buf.push_str(&format!(
-        "{ESC}[{sep_row};1H{ESC}[2K\
-         {ESC}[38;2;35;35;55m{}{ESC}[0m",
-        "─".repeat(cols)
-    ));
-
-    // Preview swatch for selected entry
-    let prev_row = (rows - 2) as u16;
-    buf.push_str(&format!("{ESC}[{prev_row};1H{ESC}[2K"));
-    if let Some(&fi) = filter.get(selected) {
-        if fi < NAMED_PALETTES.len() {
-            let (id, display, _, fh, th) = NAMED_PALETTES[fi];
-            let p = if id == "fire" {
-                soften(&FIRE_PALETTE, SOFTEN_DESATURATE, SOFTEN_BRIGHTEN)
-            } else {
-                let from = hex_to_rgb(fh).unwrap_or((0, 0, 0));
-                let to = hex_to_rgb(th).unwrap_or((255, 255, 255));
-                soften(
-                    &generate_palette(from, to),
-                    SOFTEN_DESATURATE,
-                    SOFTEN_BRIGHTEN,
-                )
-            };
-            let pw = cols.saturating_sub(22).min(72);
-            let ps = palette_swatch(&p, pw);
-            buf.push_str(&format!(
-                "  {ESC}[38;2;92;92;115m▸ {ESC}[38;2;172;172;198m{display:<16}{ESC}[0m  {ps}"
-            ));
-        } else {
-            buf.push_str(&format!(
-                "  {ESC}[38;2;92;92;115m▸ Custom gradient — press Enter to configure{ESC}[0m"
-            ));
-        }
-    }
-
-    // Key hints — folded into buf so the whole frame is one atomic write.
-    let hint_row = rows as u16;
-    buf.push_str(&format!(
-        "{ESC}[{hint_row};1H{ESC}[2K\
-         {ESC}[48;2;15;15;28m \
-         {ESC}[38;2;255;200;80m↑↓{ESC}[38;2;98;98;128m move  \
-         {ESC}[38;2;255;200;80mPgUp/Dn{ESC}[38;2;98;98;128m page  \
-         {ESC}[38;2;255;200;80m/{ESC}[38;2;98;98;128m search  \
-         {ESC}[38;2;255;200;80mr{ESC}[38;2;98;98;128m random  \
-         {ESC}[38;2;255;200;80mEnter{ESC}[38;2;98;98;128m select  \
-         {ESC}[38;2;255;200;80mEsc{ESC}[38;2;98;98;128m·{ESC}[38;2;255;200;80mq{ESC}[38;2;98;98;128m quit \
-         {ESC}[0m"
-    ));
-
-    // Single atomic write — no partial frame ever visible.
-    print!("{buf}");
-    io::stdout().flush().ok();
-}
-
-
-// ── Interactive picker ────────────────────────────────────────────────
-
-/// Run the interactive palette picker. Returns the chosen PaletteChoice
-/// or None if the user cancelled.
-pub fn interactive_pick() -> Option<PaletteChoice> {
-    let _guard = TermRawGuard::enter().ok()?;
-
-    let mut selected = 0usize;
-    let mut search = String::new();
-    let mut search_active = false;
-    let mut filter = apply_filter("");
-    let page_size = 10usize;
-
-    loop {
-        let size = terminal_size();
-        draw_picker(selected, &filter, &search, search_active, size);
-
-        let key = read_key();
-
-        if search_active {
-            match key {
-                Key::Esc | Key::Enter => {
-                    search_active = false;
-                }
-                Key::Backspace => {
-                    search.pop();
-                    filter = apply_filter(&search);
-                    selected = 0;
-                }
-                Key::Char(c) => {
-                    search.push(c);
-                    filter = apply_filter(&search);
-                    selected = 0;
-                }
-                _ => {}
-            }
-        } else {
-            match key {
-                Key::Up => {
-                    selected = selected.saturating_sub(1);
-                }
-                Key::Down => {
-                    if !filter.is_empty() && selected + 1 < filter.len() {
-                        selected += 1;
-                    }
-                }
-                Key::PageUp => {
-                    selected = selected.saturating_sub(page_size);
-                }
-                Key::PageDown => {
-                    if !filter.is_empty() {
-                        selected = (selected + page_size).min(filter.len() - 1);
-                    }
-                }
-                Key::Char('/') => {
-                    search_active = true;
-                }
-                Key::Char('r') | Key::Char('R') => {
-                    if !filter.is_empty() {
-                        let mut rng = Rng::new();
-                        selected = (rng.next_u64() % filter.len() as u64) as usize;
-                    }
-                }
-                Key::Enter => {
-                    if let Some(&fi) = filter.get(selected) {
-                        if fi < NAMED_PALETTES.len() {
-                            let (id, _, _, _, _) = NAMED_PALETTES[fi];
-                            return Some(PaletteChoice::Named(id.to_string()));
-                        } else {
-                            let (_, rows) = terminal_size();
-                            let base = rows as u16 - 4;
-                            print!("{ESC}[{base};1H{ESC}[J");
-                            println!(
-                                "{ESC}[{base};1H\
-                                 {ESC}[38;2;175;175;200m  Enter hex colors (e.g. #ff0000){ESC}[0m"
-                            );
-                            io::stdout().flush().ok();
-                            let from_str = prompt_hex("  From:", base + 2)?;
-                            let to_str = prompt_hex("  To:  ", base + 3)?;
-                            let from = hex_to_rgb(&from_str)?;
-                            let to = hex_to_rgb(&to_str)?;
-                            return Some(PaletteChoice::Custom { from, to });
-                        }
-                    }
-                }
-                Key::Esc => {
-                    if !search.is_empty() {
-                        search.clear();
-                        filter = apply_filter("");
-                        selected = 0;
-                    } else {
-                        return None;
-                    }
-                }
-                Key::Char('q') => return None,
-                _ => {}
-            }
-        }
-    }
-}
-
-// ── Settings draw ─────────────────────────────────────────────────────
-
-fn draw_settings(selected: usize, settings: &AnimSettings, (cols, rows): (usize, usize)) {
-    // Title bar
-    print!("{ESC}[1;1H");
-    let title = " pyroclear  ◆  animation settings ";
-    let gap = cols.saturating_sub(title.len());
-    print!(
-        "{ESC}[48;2;20;20;36m{ESC}[38;2;255;200;80m{title}\
-         {ESC}[38;2;50;50;72m{}{ESC}[0m",
-        " ".repeat(gap)
-    );
-
-    let anim_dur = format!("{:.1} seconds", settings.duration);
-
-    let items = [
-        (
-            "FPS / Speed    ",
-            match settings.fps {
-                15 => "15 fps  (extremely slow / cinematic)",
-                30 => "30 fps  (standard retro feel)",
-                45 => "45 fps  (smooth legacy animation)",
-                60 => "60 fps  (default smooth 60fps)",
-                75 => "75 fps  (high refresh rate)",
-                90 => "90 fps  (ultra high refresh rate)",
-                120 => "120 fps (blazing fast execution)",
-                _ => "custom fps",
-            },
-        ),
-        (
-            "Wind / Breeze  ",
-            match settings.wind {
-                -2 => "Strong Left   (blowing hard left)",
-                -1 => "Gentle Left   (gently drifting left)",
-                0 => "None          (rising straight up)",
-                1 => "Gentle Right  (gently drifting right)",
-                2 => "Strong Right  (blowing hard right)",
-                _ => "unknown wind",
-            },
-        ),
-        (
-            "Flame Height   ",
-            match settings.height {
-                0 => "Low           (fast decay, small fire)",
-                1 => "Medium        (default height decay)",
-                2 => "High          (slow decay, tall flames)",
-                3 => "Extreme       (minimum decay, full screen)",
-                _ => "unknown height",
-            },
-        ),
-        (
-            "Fire Direction ",
-            if settings.direction {
-                "Top → Bottom  (falling fire effect)"
-            } else {
-                "Bottom → Top  (classic rising flames)"
-            },
-        ),
-        (
-            "Fire Duration  ",
-            match settings.flames_duration {
-                0.10 => "Very fast",
-                0.20 => "Fast",
-                0.30 => "Normal",
-                0.38 => "Reasonably normal (default)",
-                0.50 => "Slow",
-                0.70 => "Very slow",
-                _ => "Unknown speed",
-            },
-        ),
-        (
-            "Animation Duration   ",
-            anim_dur.as_str(),
-        ),
-    ];
-
-    let start_row = 3u16;
-    for (idx, (label, value)) in items.iter().enumerate() {
-        let row = start_row + idx as u16 * 2;
-        let is_sel = idx == selected;
-        let cursor = if is_sel { "▸" } else { " " };
-
-        print!("{ESC}[{row};1H{ESC}[2K");
-        if is_sel {
-            print!("{ESC}[48;2;20;26;46m");
-            print!("  {cursor} {ESC}[1;38;2;255;230;100m{label}{ESC}[0m");
-            print!("{ESC}[48;2;20;26;46m   ◀  {ESC}[1;38;2;255;255;255m{value:<44}{ESC}[0m◀   ");
-            let taken = 4 + 1 + label.len() + 6 + 44 + 4;
-            if cols > taken {
-                print!("{}", " ".repeat(cols - taken));
-            }
-            print!("{ESC}[0m");
-        } else {
-            print!("    {label}      {ESC}[38;2;178;178;205m{value}{ESC}[0m");
-        }
-    }
-
-    let sep_row = start_row + items.len() as u16 * 2 + 1;
-    print!(
-        "{ESC}[{sep_row};1H{ESC}[2K\
-         {ESC}[38;2;35;35;55m{}{ESC}[0m",
-        "─".repeat(cols)
-    );
-
-    let hint_row = rows as u16;
-    print!("{ESC}[{hint_row};1H{ESC}[2K");
-    print!(
-        "{ESC}[48;2;15;15;28m \
-         {ESC}[38;2;255;200;80m↑↓{ESC}[38;2;98;98;128m navigate  \
-         {ESC}[38;2;255;200;80m←→{ESC}[38;2;98;98;128m adjust  \
-         {ESC}[38;2;255;200;80mEnter/s{ESC}[38;2;98;98;128m save & run  \
-         {ESC}[38;2;255;200;80mEsc/q{ESC}[38;2;98;98;128m cancel \
-         {ESC}[0m"
-    );
-
-    io::stdout().flush().ok();
-}
-
-// ── Interactive settings ──────────────────────────────────────────────
-
-pub fn interactive_settings(current: &AnimSettings) -> Option<AnimSettings> {
-    let _guard = TermRawGuard::enter().ok()?;
-    let mut settings = current.clone();
-    let mut selected = 0usize;
-    let fps_options = [15, 30, 45, 60, 75, 90, 120];
-    let duration_options = [0.10, 0.20, 0.30, 0.38, 0.50, 0.70];
-
-    loop {
-        let size = terminal_size();
-        draw_settings(selected, &settings, size);
-
-        match read_key() {
-            Key::Up => {
-                selected = selected.saturating_sub(1);
-            }
-            Key::Down => {
-                if selected < 5 {
-                    selected += 1;
-                }
-            }
-            Key::Left => match selected {
-                0 => {
-                    if let Some(idx) = fps_options.iter().position(|&x| x == settings.fps) {
-                        settings.fps = if idx > 0 {
-                            fps_options[idx - 1]
-                        } else {
-                            fps_options[fps_options.len() - 1]
-                        };
-                    }
-                }
-                1 => {
-                    settings.wind = if settings.wind > -2 {
-                        settings.wind - 1
-                    } else {
-                        2
-                    };
-                }
-                2 => {
-                    settings.height = if settings.height > 0 {
-                        settings.height - 1
-                    } else {
-                        3
-                    };
-                }
-                3 => {
-                    settings.direction = !settings.direction;
-                }
-                4 => {
-                    if let Some(idx) = duration_options.iter().position(|&x| x == settings.flames_duration) {
-                        settings.flames_duration = if idx > 0 {
-                            duration_options[idx - 1]
-                        } else {
-                            duration_options[duration_options.len() - 1]
-                        };
-                    }
-                }
-                5 => {
-                    let next = ((settings.duration - 0.1) * 10.0).round() / 10.0;
-                    settings.duration = if next >= 0.1 { next } else { 5.0 };
-                }
-                _ => {}
-            },
-            Key::Right => match selected {
-                0 => {
-                    if let Some(idx) = fps_options.iter().position(|&x| x == settings.fps) {
-                        settings.fps = if idx + 1 < fps_options.len() {
-                            fps_options[idx + 1]
-                        } else {
-                            fps_options[0]
-                        };
-                    }
-                }
-                1 => {
-                    settings.wind = if settings.wind < 2 {
-                        settings.wind + 1
-                    } else {
-                        -2
-                    };
-                }
-                2 => {
-                    settings.height = if settings.height < 3 {
-                        settings.height + 1
-                    } else {
-                        0
-                    };
-                }
-                3 => {
-                    settings.direction = !settings.direction;
-                }
-                4 => {
-                    if let Some(idx) = duration_options.iter().position(|&x| x == settings.flames_duration) {
-                        settings.flames_duration = if idx + 1 < duration_options.len() {
-                            duration_options[idx + 1]
-                        } else {
-                            duration_options[0]
-                        }
-                    }
-                }
-                5 => {
-                    let next = ((settings.duration + 0.1) * 10.0).round() / 10.0;
-                    settings.duration = if next <= 5.0 { next } else { 0.1 };
-                }
-                _ => {}
-            },
-            Key::Enter | Key::Char('s') => return Some(settings),
-            Key::Esc | Key::Char('q') => return None,
-            _ => {}
-        }
-    }
-}
-
-// ── Prompt string helper ──────────────────────────────────────────────
-
-pub fn prompt_string(label: &str, row: u16) -> Option<String> {
-    let mut input = String::new();
-    loop {
-        print!("{ESC}[{row};1H{ESC}[2K{ESC}[38;2;255;200;80m{label}{ESC}[0m {input}_");
-        io::stdout().flush().ok();
-        match read_key() {
-            Key::Enter => {
-                let s = input.trim().to_string();
-                if !s.is_empty() {
-                    return Some(s);
-                }
-            }
-            Key::Backspace => {
-                input.pop();
-            }
-            Key::Char(c) => {
-                if input.len() < 30 {
-                    input.push(c);
-                }
-            }
-            Key::Esc => return None,
-            _ => {}
-        }
-    }
-}
-
-// ── Interactive Custom Palette Manager ─────────────────────────────────
-
-pub fn interactive_custom() -> Option<PaletteChoice> {
-    let _guard = TermRawGuard::enter().ok()?;
-    let mut selected = 0usize;
-    let mut entries = crate::config::load_custom_palettes();
-
-    loop {
-        let size = terminal_size();
-        let (cols, rows) = size;
-
-        // Draw header
-        print!("{ESC}[1;1H");
-        let title = " pyroclear  ◆  custom palettes ";
-        let gap = cols.saturating_sub(title.len());
-        print!(
-            "{ESC}[48;2;20;20;36m{ESC}[38;2;255;200;80m{title}\
-             {ESC}[38;2;50;50;72m{}{ESC}[0m",
-            " ".repeat(gap)
-        );
-
-        // Draw list
-        let list_start = 2usize;
-        let list_end = rows.saturating_sub(4);
-        let visible = list_end.saturating_sub(list_start);
-
-        if selected >= entries.len() && !entries.is_empty() {
-            selected = entries.len() - 1;
-        }
-
-        let offset = if selected >= visible {
-            selected - visible + 1
-        } else {
-            0
+            poll_stdin(timeout).unwrap_or(false)
         };
 
-        for slot in 0..visible {
-            let row = (list_start + slot + 1) as u16;
-            print!("{ESC}[{row};1H{ESC}[2K");
-            let idx = slot + offset;
-            if idx >= entries.len() {
+        if has_input {
+            let key = read_key();
+
+            // Keyboard State Handler
+            if show_help {
+                // Any key closes the help screen
+                show_help = false;
+            } else if let Some(ref mut prompt) = prompt_state {
+                match key {
+                    Key::Backspace => {
+                        prompt.input_buffer.pop();
+                    }
+                    Key::Esc => {
+                        prompt_state = None;
+                    }
+                    Key::Enter => {
+                        let trimmed = prompt.input_buffer.trim().to_string();
+                        match prompt.step {
+                            PromptStep::Slug => {
+                                if !trimmed.is_empty() {
+                                    prompt.slug = trimmed.to_lowercase().replace(" ", "-");
+                                    prompt.input_buffer.clear();
+                                    prompt.step = PromptStep::Display;
+                                }
+                            }
+                            PromptStep::Display => {
+                                if !trimmed.is_empty() {
+                                    prompt.display = trimmed;
+                                    prompt.input_buffer.clear();
+                                    prompt.step = PromptStep::From;
+                                }
+                            }
+                            PromptStep::From => {
+                                if hex_to_rgb(&trimmed).is_some() {
+                                    prompt.from = trimmed;
+                                    prompt.input_buffer.clear();
+                                    prompt.step = PromptStep::To;
+                                }
+                            }
+                            PromptStep::To => {
+                                if hex_to_rgb(&trimmed).is_some() {
+                                    prompt.to = trimmed;
+                                    // Save the new custom palette entry
+                                    let new_entry = crate::config::CustomPaletteEntry {
+                                        name: prompt.slug.clone(),
+                                        display: prompt.display.clone(),
+                                        from: prompt.from.clone(),
+                                        to: prompt.to.clone(),
+                                    };
+                                    custom_entries.push(new_entry);
+                                    crate::config::save_custom_palettes(&custom_entries);
+                                    selected_custom_idx = custom_entries.len() - 1;
+                                    prompt_state = None;
+                                }
+                            }
+                        }
+                    }
+                    Key::Char(c) => {
+                        if prompt.input_buffer.len() < 30 {
+                            prompt.input_buffer.push(c);
+                        }
+                    }
+                    _ => {}
+                }
+            } else if search_active {
+                match key {
+                    Key::Esc | Key::Enter => {
+                        search_active = false;
+                    }
+                    Key::Backspace => {
+                        search_query.pop();
+                        selected_palette_idx = 0;
+                    }
+                    Key::Char(c) => {
+                        search_query.push(c);
+                        selected_palette_idx = 0;
+                    }
+                    _ => {}
+                }
+            } else {
+                // Normal Dashboard Mode Keyboard Bindings
+                match key {
+                    Key::Char('1') => active_tab = 0,
+                    Key::Char('2') => active_tab = 1,
+                    Key::Char('3') => active_tab = 2,
+                    Key::Char('h') | Key::Char('?') => show_help = true,
+                    Key::Esc | Key::Char('q') => return None,
+                    Key::Char('/') if active_tab == 0 => {
+                        search_active = true;
+                    }
+                    Key::Char('r') | Key::Char('R') => {
+                        if active_tab == 0 {
+                            let filter = apply_filter(&search_query);
+                            if !filter.is_empty() {
+                                selected_palette_idx = (rng.next_u64() % filter.len() as u64) as usize;
+                            }
+                        } else if active_tab == 2 && !custom_entries.is_empty() {
+                            selected_custom_idx = (rng.next_u64() % custom_entries.len() as u64) as usize;
+                        }
+                    }
+                    Key::Char('n') | Key::Char('N') if active_tab == 2 => {
+                        prompt_state = Some(PromptState {
+                            step: PromptStep::Slug,
+                            slug: String::new(),
+                            display: String::new(),
+                            from: String::new(),
+                            to: String::new(),
+                            input_buffer: String::new(),
+                        });
+                    }
+                    Key::Char('d') | Key::Char('D') if active_tab == 2 => {
+                        if !custom_entries.is_empty() && selected_custom_idx < custom_entries.len() {
+                            custom_entries.remove(selected_custom_idx);
+                            crate::config::save_custom_palettes(&custom_entries);
+                            if selected_custom_idx > 0 && selected_custom_idx >= custom_entries.len() {
+                                selected_custom_idx = custom_entries.len() - 1;
+                            }
+                        }
+                    }
+                    Key::Up => match active_tab {
+                        0 => selected_palette_idx = selected_palette_idx.saturating_sub(1),
+                        1 => selected_setting_idx = selected_setting_idx.saturating_sub(1),
+                        2 => selected_custom_idx = selected_custom_idx.saturating_sub(1),
+                        _ => {}
+                    },
+                    Key::Down => match active_tab {
+                        0 => {
+                            let filter = apply_filter(&search_query);
+                            if !filter.is_empty() && selected_palette_idx + 1 < filter.len() {
+                                selected_palette_idx += 1;
+                            }
+                        }
+                        1 => {
+                            if selected_setting_idx < 5 {
+                                selected_setting_idx += 1;
+                            }
+                        }
+                        2 => {
+                            if !custom_entries.is_empty() && selected_custom_idx + 1 < custom_entries.len() {
+                                selected_custom_idx += 1;
+                            }
+                        }
+                        _ => {}
+                    },
+                    Key::PageUp => match active_tab {
+                        0 => selected_palette_idx = selected_palette_idx.saturating_sub(10),
+                        2 => selected_custom_idx = selected_custom_idx.saturating_sub(10),
+                        _ => {}
+                    },
+                    Key::PageDown => match active_tab {
+                        0 => {
+                            let filter = apply_filter(&search_query);
+                            if !filter.is_empty() {
+                                selected_palette_idx = (selected_palette_idx + 10).min(filter.len() - 1);
+                            }
+                        }
+                        2 => {
+                            if !custom_entries.is_empty() {
+                                selected_custom_idx = (selected_custom_idx + 10).min(custom_entries.len() - 1);
+                            }
+                        }
+                        _ => {}
+                    },
+                    Key::Left if active_tab == 1 => {
+                        let fps_options = [15, 30, 45, 60, 75, 90, 120];
+                        let duration_options = [0.10, 0.20, 0.30, 0.38, 0.50, 0.70];
+                        match selected_setting_idx {
+                            0 => {
+                                if let Some(idx) = fps_options.iter().position(|&x| x == settings.fps) {
+                                    settings.fps = if idx > 0 { fps_options[idx - 1] } else { fps_options[fps_options.len() - 1] };
+                                }
+                            }
+                            1 => {
+                                settings.wind = if settings.wind > -2 { settings.wind - 1 } else { 2 };
+                            }
+                            2 => {
+                                settings.height = if settings.height > 0 { settings.height - 1 } else { 3 };
+                            }
+                            3 => {
+                                settings.direction = !settings.direction;
+                            }
+                            4 => {
+                                if let Some(idx) = duration_options.iter().position(|&x| x == settings.flames_duration) {
+                                    settings.flames_duration = if idx > 0 { duration_options[idx - 1] } else { duration_options[duration_options.len() - 1] };
+                                }
+                            }
+                            5 => {
+                                let next = ((settings.duration - 0.1) * 10.0).round() / 10.0;
+                                settings.duration = if next >= 0.1 { next } else { 5.0 };
+                            }
+                            _ => {}
+                        }
+                    }
+                    Key::Right if active_tab == 1 => {
+                        let fps_options = [15, 30, 45, 60, 75, 90, 120];
+                        let duration_options = [0.10, 0.20, 0.30, 0.38, 0.50, 0.70];
+                        match selected_setting_idx {
+                            0 => {
+                                if let Some(idx) = fps_options.iter().position(|&x| x == settings.fps) {
+                                    settings.fps = if idx + 1 < fps_options.len() { fps_options[idx + 1] } else { fps_options[0] };
+                                }
+                            }
+                            1 => {
+                                settings.wind = if settings.wind < 2 { settings.wind + 1 } else { -2 };
+                            }
+                            2 => {
+                                settings.height = if settings.height < 3 { settings.height + 1 } else { 0 };
+                            }
+                            3 => {
+                                settings.direction = !settings.direction;
+                            }
+                            4 => {
+                                if let Some(idx) = duration_options.iter().position(|&x| x == settings.flames_duration) {
+                                    settings.flames_duration = if idx + 1 < duration_options.len() { duration_options[idx + 1] } else { duration_options[0] };
+                                }
+                            }
+                            5 => {
+                                let next = ((settings.duration + 0.1) * 10.0).round() / 10.0;
+                                settings.duration = if next <= 5.0 { next } else { 0.1 };
+                            }
+                            _ => {}
+                        }
+                    }
+                    Key::Enter => {
+                        // Confirm active choices and return them to caller
+                        match active_tab {
+                            0 => {
+                                let filter = apply_filter(&search_query);
+                                if let Some(&fi) = filter.get(selected_palette_idx) {
+                                    if fi < NAMED_PALETTES.len() {
+                                        let (id, _, _, _, _) = NAMED_PALETTES[fi];
+                                        return Some((PaletteChoice::Named(id.to_string()), settings));
+                                    } else {
+                                        // Trigger inline custom editor fallback
+                                        let base = rows as u16 - 4;
+                                        print!("{ESC}[{base};1H{ESC}[J");
+                                        println!("{ESC}[{base};1H{ESC}[38;2;175;175;200m  Enter hex colors (e.g. #ff0000){ESC}[0m");
+                                        io::stdout().flush().ok();
+                                        if let Some(from_str) = prompt_hex("  From:", base + 2) {
+                                            if let Some(to_str) = prompt_hex("  To:  ", base + 3) {
+                                                if let (Some(from), Some(to)) = (hex_to_rgb(&from_str), hex_to_rgb(&to_str)) {
+                                                    return Some((PaletteChoice::Custom { from, to }, settings));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            1 => {
+                                // Settings save & run
+                                let (name, _, _, _) = get_current_palette(selected_palette_idx, &search_query, &custom_entries);
+                                return Some((PaletteChoice::Named(name), settings));
+                            }
+                            2 => {
+                                // Custom list confirm
+                                if !custom_entries.is_empty() && selected_custom_idx < custom_entries.len() {
+                                    let entry = &custom_entries[selected_custom_idx];
+                                    if let Some(choice) = entry.to_palette_choice() {
+                                        return Some((choice, settings));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // 3. Ticking and Rendering Loop (Target: 30 FPS)
+        if last_tick.elapsed() >= tick_duration {
+            let current_size = terminal_size();
+            if current_size != (cols, rows) {
+                cols = current_size.0;
+                rows = current_size.1;
+                print!("{ESC}[H{ESC}[2J"); // clear screen on resizing
+            }
+
+            // Render Warning Screen if Window is Too Small
+            if cols < 80 || rows < 20 {
+                let mut buf = String::new();
+                let box_w = 60usize.min(cols.saturating_sub(4));
+                let box_h = 12usize.min(rows.saturating_sub(2));
+                let start_x = (cols.saturating_sub(box_w)) / 2;
+                let start_y = (rows.saturating_sub(box_h)) / 2;
+
+                buf.push_str(&format!("{ESC}[H{ESC}[2J"));
+                // outer box
+                let top_line = format!("╭─{}─╮", "─".repeat(box_w.saturating_sub(4)));
+                buf.push_str(&format!("{ESC}[{};{}H{ESC}[38;2;85;85;115m{}{ESC}[0m", start_y, start_x, top_line));
+                for i in 1..box_h.saturating_sub(1) {
+                    buf.push_str(&format!(
+                        "{ESC}[{};{}H{ESC}[38;2;85;85;115m│{}{}│{ESC}[0m",
+                        start_y + i,
+                        start_x,
+                        " ".repeat(box_w.saturating_sub(2)),
+                        ""
+                    ));
+                }
+                let bot_line = format!("╰─{}─╯", "─".repeat(box_w.saturating_sub(4)));
+                buf.push_str(&format!("{ESC}[{};{}H{ESC}[38;2;85;85;115m{}{ESC}[0m", start_y + box_h - 1, start_x, bot_line));
+
+                let msg1 = "Terminal size too small!";
+                let msg2 = &format!("Current size: {}x{}", cols, rows);
+                let msg3 = "Please resize to at least 80x20.";
+                let msg4 = "Press [q] or [Esc] to exit.";
+
+                buf.push_str(&format!("{ESC}[{};{}H{ESC}[1;38;2;255;70;70m{}{ESC}[0m", start_y + 2, start_x + (box_w.saturating_sub(msg1.len())) / 2, msg1));
+                buf.push_str(&format!("{ESC}[{};{}H{ESC}[38;2;150;150;180m{}{ESC}[0m", start_y + 4, start_x + (box_w.saturating_sub(msg2.len())) / 2, msg2));
+                buf.push_str(&format!("{ESC}[{};{}H{ESC}[38;2;150;150;180m{}{ESC}[0m", start_y + 6, start_x + (box_w.saturating_sub(msg3.len())) / 2, msg3));
+                buf.push_str(&format!("{ESC}[{};{}H{ESC}[38;2;90;90;120m{}{ESC}[0m", start_y + 8, start_x + (box_w.saturating_sub(msg4.len())) / 2, msg4));
+
+                print!("{buf}");
+                io::stdout().flush().ok();
+
+                last_tick = Instant::now();
                 continue;
             }
 
-            let entry = &entries[idx];
-            let is_sel = idx == selected;
-            let cursor = if is_sel { "▸" } else { " " };
+            // Draw Unified Dashboard
+            let mut buf = String::with_capacity(cols * rows * 24);
 
-            if is_sel {
-                print!("{ESC}[48;2;20;26;46m");
-            }
-
-            let from_rgb = hex_to_rgb(&entry.from).unwrap_or((0, 0, 0));
-            let to_rgb = hex_to_rgb(&entry.to).unwrap_or((255, 255, 255));
-            let p = soften(
-                &generate_palette(from_rgb, to_rgb),
-                SOFTEN_DESATURATE,
-                SOFTEN_BRIGHTEN,
+            // Row 1: Outer top frame border
+            let left_w = 42usize;
+            let right_w = cols.saturating_sub(49);
+            let top_border = format!(
+                "╭─{}─┬─{}─╮",
+                "─".repeat(left_w),
+                "─".repeat(right_w)
             );
-            let sw_w = (cols.saturating_sub(55)).clamp(10, 30);
-            let sw_str = palette_swatch(&p, sw_w);
+            buf.push_str(&format!("{ESC}[1;1H{ESC}[38;2;60;60;85m{}{ESC}[0m", top_border));
 
-            if is_sel {
-                print!("{ESC}[1;38;2;255;230;100m");
+            // Row 2: Tab Bar
+            let tab0_str = if active_tab == 0 {
+                format!("{ESC}[48;2;255;165;45m{ESC}[1;38;2;15;15;28m 🎨 Browse Palettes {ESC}[0m")
             } else {
-                print!("{ESC}[38;2;178;178;205m");
-            }
+                format!("{ESC}[38;2;160;160;185m 🎨 Browse Palettes {ESC}[0m")
+            };
+            let tab1_str = if active_tab == 1 {
+                format!("{ESC}[48;2;255;165;45m{ESC}[1;38;2;15;15;28m ⚙️ Physics Settings {ESC}[0m")
+            } else {
+                format!("{ESC}[38;2;160;160;185m ⚙️ Physics Settings {ESC}[0m")
+            };
+            let tab2_str = if active_tab == 2 {
+                format!("{ESC}[48;2;255;165;45m{ESC}[1;38;2;15;15;28m 🛠️ Custom Gradients {ESC}[0m")
+            } else {
+                format!("{ESC}[38;2;160;160;185m 🛠️ Custom Gradients {ESC}[0m")
+            };
 
-            print!(
-                "  {cursor} {:<15} ({:<10})  {sw_str}  ",
-                entry.display, entry.name
+            let tabs_combined = format!("{}  {}  {}", tab0_str, tab1_str, tab2_str);
+            let help_str = format!("{ESC}[38;2;90;90;120m[h] Help{ESC}[0m");
+            let inner_w = cols.saturating_sub(4);
+            let left_vis = visual_width(&tabs_combined);
+            let right_vis = visual_width(&help_str);
+            let space_count = inner_w.saturating_sub(left_vis + right_vis);
+            let row2_content = format!("{}{}{}", tabs_combined, " ".repeat(space_count), help_str);
+            buf.push_str(&format!(
+                "{ESC}[2;1H{ESC}[38;2;60;60;85m│{ESC}[0m {} {ESC}[38;2;60;60;85m│{ESC}[0m",
+                pad_right(&row2_content, cols.saturating_sub(4))
+            ));
+
+            // Row 3: Horizontal separator
+            let middle_border = format!(
+                "├─{}─┼─{}─┤",
+                "─".repeat(left_w),
+                "─".repeat(right_w)
             );
-            print!(
-                "{ESC}[38;2;82;82;108m{}\
-                 {ESC}[38;2;48;48;68m→\
-                 {ESC}[38;2;82;82;108m{}{ESC}[0m",
-                entry.from, entry.to
-            );
+            buf.push_str(&format!("{ESC}[3;1H{ESC}[38;2;60;60;85m{}{ESC}[0m", middle_border));
 
-            print!("{ESC}[0m");
-        }
+            // 4. Generate Content Lines for Left Pane
+            let mut left_lines = Vec::new();
+            let body_h = rows.saturating_sub(5);
 
-        if entries.is_empty() {
-            print!("{ESC}[4;1H{ESC}[2K  No custom palettes saved yet. Press 'n' to create one!");
-        }
+            match active_tab {
+                0 => {
+                    // Palettes Browsing Tab
+                    let search_bar = if search_query.is_empty() && !search_active {
+                        format!("{ESC}[38;2;55;55;75mSearch: / {ESC}[38;2;55;55;70m(press / to start search){ESC}[0m")
+                    } else {
+                        let caret = if search_active { "_" } else { "" };
+                        format!("{ESC}[38;2;255;165;45mSearch: /{ESC}[1;38;2;255;255;255m{}{}{ESC}[0m", search_query, caret)
+                    };
+                    left_lines.push(pad_right(&search_bar, left_w));
+                    left_lines.push(pad_right(&format!("{ESC}[38;2;45;45;65m{} {ESC}[0m", "╌".repeat(left_w)), left_w));
 
-        // Separator
-        let sep_row = (list_end + 1) as u16;
-        print!(
-            "{ESC}[{sep_row};1H{ESC}[2K\
-             {ESC}[38;2;35;35;55m{}{ESC}[0m",
-            "─".repeat(cols)
-        );
+                    // List of visible named palettes
+                    let filter = apply_filter(&search_query);
+                    let list_rows = body_h.saturating_sub(2);
+                    let offset = if selected_palette_idx >= list_rows {
+                        selected_palette_idx - list_rows + 1
+                    } else {
+                        0
+                    };
 
-        // Preview swatch for selected entry
-        let prev_row = (rows - 2) as u16;
-        print!("{ESC}[{prev_row};1H{ESC}[2K");
-        if !entries.is_empty() && selected < entries.len() {
-            let entry = &entries[selected];
-            let from_rgb = hex_to_rgb(&entry.from).unwrap_or((0, 0, 0));
-            let to_rgb = hex_to_rgb(&entry.to).unwrap_or((255, 255, 255));
-            let p = soften(
-                &generate_palette(from_rgb, to_rgb),
-                SOFTEN_DESATURATE,
-                SOFTEN_BRIGHTEN,
-            );
-            let pw = cols.saturating_sub(22).min(72);
-            let ps = palette_swatch(&p, pw);
-            print!(
-                "  {ESC}[38;2;92;92;115m▸ {ESC}[38;2;172;172;198m{:<16}{ESC}[0m  {ps}",
-                entry.display
-            );
-        }
+                    for slot in 0..list_rows {
+                        let fi_pos = slot + offset;
+                        if fi_pos >= filter.len() {
+                            left_lines.push(pad_right("", left_w));
+                            continue;
+                        }
+                        let fi = filter[fi_pos];
+                        let is_sel = fi_pos == selected_palette_idx;
+                        let indicator = if is_sel {
+                            format!("{ESC}[1;38;2;255;200;80m▸ {ESC}[0m")
+                        } else {
+                            "  ".to_string()
+                        };
 
-        // Key hints
-        let hint_row = rows as u16;
-        print!("{ESC}[{hint_row};1H{ESC}[2K");
-        print!(
-            "{ESC}[48;2;15;15;28m \
-             {ESC}[38;2;255;200;80m↑↓{ESC}[38;2;98;98;128m move  \
-             {ESC}[38;2;255;200;80mn{ESC}[38;2;98;98;128m new  \
-             {ESC}[38;2;255;200;80md{ESC}[38;2;98;98;128m delete  \
-             {ESC}[38;2;255;200;80mEnter{ESC}[38;2;98;98;128m run  \
-             {ESC}[38;2;255;200;80mEsc/q{ESC}[38;2;98;98;128m back \
-             {ESC}[0m"
-        );
-        io::stdout().flush().ok();
+                        let (display_name, swatch_str, hex_str) = if fi < NAMED_PALETTES.len() {
+                            let (id, display, _, fh, th) = NAMED_PALETTES[fi];
+                            let p = if id == "fire" {
+                                soften(&FIRE_PALETTE, SOFTEN_DESATURATE, SOFTEN_BRIGHTEN)
+                            } else {
+                                let from = hex_to_rgb(fh).unwrap_or((0, 0, 0));
+                                let to = hex_to_rgb(th).unwrap_or((255, 255, 255));
+                                soften(&generate_palette(from, to), SOFTEN_DESATURATE, SOFTEN_BRIGHTEN)
+                            };
+                            (
+                                display.to_string(),
+                                palette_swatch(&p, 10),
+                                format!("{ESC}[38;2;90;90;110m{}→{}{ESC}[0m", &fh[1..], &th[1..]),
+                            )
+                        } else {
+                            (
+                                "Custom".to_string(),
+                                swatch((50, 0, 60), (255, 180, 80), 10),
+                                format!("{ESC}[38;2;90;90;110mcustom gradient{ESC}[0m"),
+                            )
+                        };
 
-        match read_key() {
-            Key::Up => {
-                selected = selected.saturating_sub(1);
-            }
-            Key::Down => {
-                if !entries.is_empty() && selected + 1 < entries.len() {
-                    selected += 1;
+                        let name_styled = if is_sel {
+                            format!("{ESC}[1;38;2;255;255;255m{:<14}{ESC}[0m", truncate_display(&display_name, 14))
+                        } else {
+                            format!("{ESC}[38;2;160;160;180m{:<14}{ESC}[0m", truncate_display(&display_name, 14))
+                        };
+
+                        let entry_line = format!("{}{}{}  {}", indicator, name_styled, swatch_str, hex_str);
+                        left_lines.push(pad_right(&entry_line, left_w));
+                    }
                 }
-            }
-            Key::Char('n') | Key::Char('N') => {
-                let base = rows as u16 - 4;
-                print!("{ESC}[{base};1H{ESC}[J");
-                println!(
-                    "{ESC}[{base};1H\
-                     {ESC}[38;2;175;175;200m  Create new custom palette{ESC}[0m"
-                );
-                io::stdout().flush().ok();
+                1 => {
+                    // Physics Settings Tab
+                    left_lines.push(format_setting_row(
+                        "FPS / Speed",
+                        &format!("{} fps", settings.fps),
+                        selected_setting_idx == 0,
+                    ));
+                    left_lines.push(pad_right("", left_w));
 
-                if let Some(name) = prompt_string("  Slug (id):", base + 1) {
-                    let slug = name.to_lowercase().replace(" ", "-");
-                    if let Some(display) = prompt_string("  Name:     ", base + 2) {
-                        if let Some(from_str) = prompt_hex("  From hex: ", base + 3) {
-                            if let Some(to_str) = prompt_hex("  To hex:   ", base + 4) {
-                                entries.push(crate::config::CustomPaletteEntry {
-                                    name: slug,
-                                    display,
-                                    from: from_str,
-                                    to: to_str,
-                                });
-                                crate::config::save_custom_palettes(&entries);
-                                selected = entries.len() - 1;
+                    let wind_label = match settings.wind {
+                        -2 => "Strong Left",
+                        -1 => "Gentle Left",
+                        0 => "None",
+                        1 => "Gentle Right",
+                        2 => "Strong Right",
+                        _ => "None",
+                    };
+                    left_lines.push(format_setting_row(
+                        "Wind / Breeze",
+                        wind_label,
+                        selected_setting_idx == 1,
+                    ));
+                    left_lines.push(pad_right("", left_w));
+
+                    let height_label = match settings.height {
+                        0 => "Low",
+                        1 => "Medium",
+                        2 => "High",
+                        3 => "Extreme",
+                        _ => "Medium",
+                    };
+                    left_lines.push(format_setting_row(
+                        "Flame Height",
+                        height_label,
+                        selected_setting_idx == 2,
+                    ));
+                    left_lines.push(pad_right("", left_w));
+
+                    left_lines.push(format_setting_row(
+                        "Fire Direction",
+                        if settings.direction { "Top → Bottom" } else { "Bottom → Top" },
+                        selected_setting_idx == 3,
+                    ));
+                    left_lines.push(pad_right("", left_w));
+
+                    let decay_speed = match settings.flames_duration {
+                        0.10 => "Very Fast",
+                        0.20 => "Fast",
+                        0.30 => "Normal",
+                        0.38 => "Default",
+                        0.50 => "Slow",
+                        0.70 => "Very Slow",
+                        _ => "Normal",
+                    };
+                    left_lines.push(format_setting_row(
+                        "Fire Decay",
+                        decay_speed,
+                        selected_setting_idx == 4,
+                    ));
+                    left_lines.push(pad_right("", left_w));
+
+                    left_lines.push(format_setting_row(
+                        "Duration",
+                        &format!("{:.1}s", settings.duration),
+                        selected_setting_idx == 5,
+                    ));
+
+                    // Fill remainder rows
+                    while left_lines.len() < body_h {
+                        left_lines.push(pad_right("", left_w));
+                    }
+                }
+                2 => {
+                    // Custom Palettes Tab
+                    if let Some(ref prompt) = prompt_state {
+                        // Drawing non-blocking inline guided form input
+                        left_lines.push(pad_right(&format!("{ESC}[1;38;2;255;165;45m🛠️  Create Custom Palette{ESC}[0m"), left_w));
+                        left_lines.push(pad_right(&format!("{ESC}[38;2;60;60;80m{} {ESC}[0m", "━".repeat(left_w)), left_w));
+                        left_lines.push(pad_right("", left_w));
+
+                        let slug_active = prompt.step == PromptStep::Slug;
+                        left_lines.push(pad_right(&format!("  Slug ID: {}", if slug_active { "" } else { &prompt.slug }), left_w));
+                        if slug_active {
+                            left_lines.push(pad_right(&format!("  {ESC}[48;2;25;25;44m> {}{} {ESC}[0m", prompt.input_buffer, "_"), left_w));
+                        }
+                        left_lines.push(pad_right("", left_w));
+
+                        let disp_active = prompt.step == PromptStep::Display;
+                        left_lines.push(pad_right(&format!("  Name:    {}", if disp_active || slug_active { "" } else { &prompt.display }), left_w));
+                        if disp_active {
+                            left_lines.push(pad_right(&format!("  {ESC}[48;2;25;25;44m> {}{} {ESC}[0m", prompt.input_buffer, "_"), left_w));
+                        }
+                        left_lines.push(pad_right("", left_w));
+
+                        let from_active = prompt.step == PromptStep::From;
+                        left_lines.push(pad_right(&format!("  From Color (hex): {}", if from_active || disp_active || slug_active { "" } else { &prompt.from }), left_w));
+                        if from_active {
+                            left_lines.push(pad_right(&format!("  {ESC}[48;2;25;25;44m> {}{} {ESC}[0m", prompt.input_buffer, "_"), left_w));
+                        }
+                        left_lines.push(pad_right("", left_w));
+
+                        let to_active = prompt.step == PromptStep::To;
+                        left_lines.push(pad_right(&format!("  To Color (hex):   {}", if to_active || from_active || disp_active || slug_active { "" } else { &prompt.to }), left_w));
+                        if to_active {
+                            left_lines.push(pad_right(&format!("  {ESC}[48;2;25;25;44m> {}{} {ESC}[0m", prompt.input_buffer, "_"), left_w));
+                        }
+
+                        // Fill remainder rows
+                        while left_lines.len() < body_h {
+                            left_lines.push(pad_right("", left_w));
+                        }
+                    } else {
+                        // Regular custom list mode
+                        left_lines.push(pad_right(&format!("{ESC}[38;2;90;90;120m[n] Create New     [d] Delete selected{ESC}[0m"), left_w));
+                        left_lines.push(pad_right(&format!("{ESC}[38;2;45;45;65m{} {ESC}[0m", "╌".repeat(left_w)), left_w));
+
+                        let list_rows = body_h.saturating_sub(2);
+                        let offset = if selected_custom_idx >= list_rows {
+                            selected_custom_idx - list_rows + 1
+                        } else {
+                            0
+                        };
+
+                        if custom_entries.is_empty() {
+                            left_lines.push(pad_right("  No custom gradients saved yet.", left_w));
+                            left_lines.push(pad_right("  Press 'n' to create one!", left_w));
+                        } else {
+                            for slot in 0..list_rows {
+                                let idx = slot + offset;
+                                if idx >= custom_entries.len() {
+                                    left_lines.push(pad_right("", left_w));
+                                    continue;
+                                }
+                                let is_sel = idx == selected_custom_idx;
+                                let entry = &custom_entries[idx];
+
+                                let indicator = if is_sel {
+                                    format!("{ESC}[1;38;2;255;200;80m▸ {ESC}[0m")
+                                } else {
+                                    "  ".to_string()
+                                };
+
+                                let name_styled = if is_sel {
+                                    format!("{ESC}[1;38;2;255;255;255m{:<14}{ESC}[0m", truncate_display(&entry.display, 14))
+                                } else {
+                                    format!("{ESC}[38;2;160;160;180m{:<14}{ESC}[0m", truncate_display(&entry.display, 14))
+                                };
+
+                                let from_rgb = hex_to_rgb(&entry.from).unwrap_or((0, 0, 0));
+                                let to_rgb = hex_to_rgb(&entry.to).unwrap_or((255, 255, 255));
+                                let p = soften(&generate_palette(from_rgb, to_rgb), SOFTEN_DESATURATE, SOFTEN_BRIGHTEN);
+                                let sw = palette_swatch(&p, 10);
+                                let hex_str = format!("{ESC}[38;2;90;90;110m{}→{}{ESC}[0m", &entry.from[1..], &entry.to[1..]);
+
+                                let entry_line = format!("{}{}{}  {}", indicator, name_styled, sw, hex_str);
+                                left_lines.push(pad_right(&entry_line, left_w));
                             }
                         }
                     }
                 }
+                _ => {}
             }
-            Key::Char('d') | Key::Char('D') => {
-                if !entries.is_empty() && selected < entries.len() {
-                    entries.remove(selected);
-                    crate::config::save_custom_palettes(&entries);
-                    if selected > 0 && selected >= entries.len() {
-                        selected = entries.len() - 1;
-                    }
+
+            // 5. Generate Content Lines for Right Pane (Preview and Specs)
+            let mut right_lines = Vec::new();
+
+            // Calculate responsive sizes - fire preview box can now scale up to 32 rows tall
+            let prev_box_h = body_h.saturating_sub(6).clamp(10, 32);
+            let specs_box_h = body_h.saturating_sub(prev_box_h + 2);
+
+
+            // Dynamic live fire preview tick & render
+            let (preview_id, preview_disp, preview_fh, preview_th) = if active_tab == 2 && !custom_entries.is_empty() && selected_custom_idx < custom_entries.len() {
+                let entry = &custom_entries[selected_custom_idx];
+                ("custom".to_string(), entry.display.clone(), entry.from.clone(), entry.to.clone())
+            } else {
+                get_current_palette(selected_palette_idx, &search_query, &custom_entries)
+            };
+
+            let preview_pal = if preview_id == "fire" {
+                soften(&FIRE_PALETTE, SOFTEN_DESATURATE, SOFTEN_BRIGHTEN)
+            } else {
+                let from = hex_to_rgb(&preview_fh).unwrap_or((0, 0, 0));
+                let to = hex_to_rgb(&preview_th).unwrap_or((255, 255, 255));
+                soften(&generate_palette(from, to), SOFTEN_DESATURATE, SOFTEN_BRIGHTEN)
+            };
+
+            let prev_fire_w = right_w.saturating_sub(4);
+            preview_fire.resize(prev_fire_w, prev_box_h);
+            preview_fire.tick(&settings, &mut rng);
+
+            // Draw upper box: live fire preview
+            let prev_title = " Live Fire Preview ";
+            let prev_top = format!("╭─{}{}{}╮", prev_title, "─".repeat(right_w.saturating_sub(prev_title.len() + 4)), "─");
+            right_lines.push(format!("{ESC}[38;2;60;60;85m{}{ESC}[0m", prev_top));
+
+            let fire_lines = preview_fire.render_lines(&preview_pal);
+            for fire_line in fire_lines {
+                right_lines.push(format!(
+                    "{ESC}[38;2;60;60;85m│{ESC}[0m {} {ESC}[38;2;60;60;85m│{ESC}[0m",
+                    pad_right(&fire_line, right_w.saturating_sub(2))
+                ));
+            }
+            let prev_bot = format!("╰{}╯", "─".repeat(right_w.saturating_sub(2)));
+            right_lines.push(format!("{ESC}[38;2;60;60;85m{}{ESC}[0m", prev_bot));
+
+            // Draw lower box: detailed specs
+            let specs_title = " Palette Specs ";
+            let specs_top = format!("╭─{}{}{}╮", specs_title, "─".repeat(right_w.saturating_sub(specs_title.len() + 4)), "─");
+            right_lines.push(format!("{ESC}[38;2;60;60;85m{}{ESC}[0m", specs_top));
+
+            let mut spec_content = Vec::new();
+            spec_content.push(format!("{ESC}[38;2;255;165;45mName:    {ESC}[1;38;2;255;255;255m{}{ESC}[0m", preview_disp));
+            spec_content.push(format!("{ESC}[38;2;255;165;45mID/Slug: {ESC}[38;2;170;170;190m{}{ESC}[0m", preview_id));
+            spec_content.push(format!("{ESC}[38;2;255;165;45mColors:  {ESC}[38;2;90;90;120m{} {ESC}[38;2;60;60;85m→{ESC}[38;2;90;90;120m {}{ESC}[0m", preview_fh, preview_th));
+            spec_content.push(format!("{ESC}[38;2;255;165;45mPhysics: {ESC}[38;2;140;140;160m{} FPS | Height: {}{ESC}[0m", settings.fps, match settings.height { 0 => "Low", 1 => "Medium", 2 => "High", 3 => "Extreme", _ => "Medium" }));
+
+            for i in 0..specs_box_h.saturating_sub(2) {
+                let text = if i < spec_content.len() { &spec_content[i] } else { "" };
+                right_lines.push(format!(
+                    "{ESC}[38;2;60;60;85m│{ESC}[0m  {}  {ESC}[38;2;60;60;85m│{ESC}[0m",
+                    pad_right(text, right_w.saturating_sub(4))
+                ));
+            }
+            let specs_bot = format!("╰{}╯", "─".repeat(right_w.saturating_sub(2)));
+            right_lines.push(format!("{ESC}[38;2;60;60;85m{}{ESC}[0m", specs_bot));
+
+            // 6. Zip Left and Right Panes into Body rows
+            for y in 0..body_h {
+                let left_content = left_lines.get(y).cloned().unwrap_or_else(|| pad_right("", left_w));
+                let right_content = right_lines.get(y).cloned().unwrap_or_else(|| pad_right("", right_w));
+                buf.push_str(&format!(
+                    "{ESC}[{};1H{ESC}[38;2;60;60;85m│{ESC}[0m {} {ESC}[38;2;60;60;85m│{ESC}[0m {} {ESC}[38;2;60;60;85m│{ESC}[0m",
+                    y + 4,
+                    left_content,
+                    right_content
+                ));
+            }
+
+            // 7. Bottom frame border
+            let bot_row = rows.saturating_sub(1);
+            let bot_border = format!(
+                "╰─{}─┴─{}─╯",
+                "─".repeat(left_w),
+                "─".repeat(right_w)
+            );
+            buf.push_str(&format!("{ESC}[{};1H{ESC}[38;2;60;60;85m{}{ESC}[0m", bot_row, bot_border));
+
+            // 8. Footer hints
+            let footer_row = rows;
+            let hints_line = if prompt_state.is_some() {
+                format!(
+                    "{ESC}[48;2;15;15;28m \
+                     {ESC}[38;2;255;200;80mEnter{ESC}[38;2;98;98;128m submit field  \
+                     {ESC}[38;2;255;200;80mEsc{ESC}[38;2;98;98;128m cancel  \
+                     {ESC}[0m"
+                )
+            } else if search_active {
+                format!(
+                    "{ESC}[48;2;15;15;28m \
+                     {ESC}[38;2;255;200;80mEnter/Esc{ESC}[38;2;98;98;128m finish search  \
+                     {ESC}[38;2;255;200;80mBackspace/Chars{ESC}[38;2;98;98;128m type query  \
+                     {ESC}[0m"
+                )
+            } else {
+                format!(
+                    "{ESC}[48;2;15;15;28m \
+                     {ESC}[38;2;255;200;80mTab/1-3{ESC}[38;2;98;98;128m tabs  \
+                     {ESC}[38;2;255;200;80m↑↓{ESC}[38;2;98;98;128m move  \
+                     {ESC}[38;2;255;200;80m←→{ESC}[38;2;98;98;128m adjust  \
+                     {ESC}[38;2;255;200;80mEnter{ESC}[38;2;98;98;128m save & run  \
+                     {ESC}[38;2;255;200;80mh{ESC}[38;2;98;98;128m help  \
+                     {ESC}[38;2;255;200;80mEsc/q{ESC}[38;2;98;98;128m quit \
+                     {ESC}[0m"
+                )
+            };
+            buf.push_str(&format!(
+                "{ESC}[{};1H{ESC}[2K{}",
+                footer_row,
+                pad_right(&hints_line, cols)
+            ));
+
+            // 9. Overlay Keyboard Help Modal Card
+            if show_help {
+                let help_w = 56usize;
+                let help_h = 14usize;
+                let help_x = (cols.saturating_sub(help_w)) / 2;
+                let help_y = (rows.saturating_sub(help_h)) / 2;
+
+                // Help box background shading
+                for i in 0..help_h {
+                    buf.push_str(&format!(
+                        "{ESC}[{};{}H{ESC}[48;2;20;20;32m{}{ESC}[0m",
+                        help_y + i,
+                        help_x,
+                        " ".repeat(help_w)
+                    ));
+                }
+
+                // Help box borders
+                let h_top = format!("╭─ Help & Keyboard Bindings ─{}╮", "─".repeat(help_w.saturating_sub(30)));
+                buf.push_str(&format!("{ESC}[{};{}H{ESC}[1;38;2;255;165;45m{}{ESC}[0m", help_y, help_x, h_top));
+                for i in 1..help_h.saturating_sub(1) {
+                    buf.push_str(&format!(
+                        "{ESC}[{};{}H{ESC}[38;2;120;120;145m│{ESC}[0m{ESC}[{};{}H{ESC}[38;2;120;120;145m│{ESC}[0m",
+                        help_y + i,
+                        help_x,
+                        help_y + i,
+                        help_x + help_w - 1
+                    ));
+                }
+                let h_bot = format!("╰{}╯", "─".repeat(help_w.saturating_sub(2)));
+                buf.push_str(&format!("{ESC}[{};{}H{ESC}[38;2;120;120;145m{}{ESC}[0m", help_y + help_h - 1, help_x, h_bot));
+
+                // Help text items
+                let help_items = [
+                    ("Tab / 1-3", "Switch between main Dashboard tabs"),
+                    ("Up / Down", "Move selection in lists and settings"),
+                    ("PageUp/Dn", "Page through palette lists rapidly"),
+                    ("Left/Right", "Adjust physics sliders/toggle direction"),
+                    ("/", "Start searching palettes (Tab 1)"),
+                    ("n / N", "Create a new custom palette (Tab 3)"),
+                    ("d / D", "Delete selected custom palette (Tab 3)"),
+                    ("r / R", "Pick a random item under current tab"),
+                    ("Enter", "Apply active choices, save to disk & RUN"),
+                    ("Esc / q", "Discard adjustments and exit dashboard"),
+                ];
+
+                for (idx, (keys, action)) in help_items.iter().enumerate() {
+                    let r = help_y + 2 + idx;
+                    buf.push_str(&format!(
+                        "{ESC}[{};{}H  {ESC}[1;38;2;255;200;80m{:<12}{ESC}[0m {ESC}[38;2;170;170;190m{}{ESC}[0m",
+                        r,
+                        help_x + 2,
+                        keys,
+                        action
+                    ));
                 }
             }
-            Key::Enter => {
-                if !entries.is_empty() && selected < entries.len() {
-                    let entry = &entries[selected];
-                    if let Some(choice) = entry.to_palette_choice() {
-                        return Some(choice);
-                    }
-                }
-            }
-            Key::Esc | Key::Char('q') => return None,
-            _ => {}
+
+            // Single atomic write to stdout
+            print!("{buf}");
+            io::stdout().flush().ok();
+
+            last_tick = Instant::now();
         }
     }
 }
+
+// ── Obsolete shims wrapping the new unified dashboard ─────────────────
+
+pub fn interactive_pick() -> Option<PaletteChoice> {
+    let (_, current_settings) = crate::config::load_config();
+    if let Some((new_choice, new_settings)) = run_dashboard(0, None, current_settings) {
+        if !crate::config::has_no_save() {
+            crate::config::save_config(&new_choice, &new_settings);
+        }
+        Some(new_choice)
+    } else {
+        None
+    }
+}
+
+pub fn interactive_settings(current: &AnimSettings) -> Option<AnimSettings> {
+    let (saved_choice, _) = crate::config::load_config();
+    let choice = saved_choice.unwrap_or(PaletteChoice::Named("fire".to_string()));
+    if let Some((new_choice, new_settings)) = run_dashboard(1, Some(choice), current.clone()) {
+        if !crate::config::has_no_save() {
+            crate::config::save_config(&new_choice, &new_settings);
+        }
+        Some(new_settings)
+    } else {
+        None
+    }
+}
+
+pub fn interactive_custom() -> Option<PaletteChoice> {
+    let (_, current_settings) = crate::config::load_config();
+    if let Some((new_choice, new_settings)) = run_dashboard(2, None, current_settings) {
+        if !crate::config::has_no_save() {
+            crate::config::save_config(&new_choice, &new_settings);
+        }
+        Some(new_choice)
+    } else {
+        None
+    }
+}
+
