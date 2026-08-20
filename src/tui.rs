@@ -944,7 +944,7 @@ pub fn run_dashboard(
                         format!("{ESC}[38;2;255;165;45mSearch: /{ESC}[1;38;2;255;255;255m{}{}{ESC}[0m", search_query, caret)
                     };
                     left_lines.push(pad_right(&search_bar, left_w));
-                    left_lines.push(pad_right(&format!("{ESC}[38;2;45;45;65m{} {ESC}[0m", "╌".repeat(left_w)), left_w));
+                    left_lines.push(pad_right(&format!("{ESC}[38;2;45;45;65m{}{ESC}[0m", "╌".repeat(left_w)), left_w));
 
                     // List of visible named palettes
                     let filter = apply_filter(&search_query);
@@ -1078,7 +1078,7 @@ pub fn run_dashboard(
                     if let Some(ref prompt) = prompt_state {
                         // Drawing non-blocking inline guided form input
                         left_lines.push(pad_right(&format!("{ESC}[1;38;2;255;165;45m🛠️  Create Custom Palette{ESC}[0m"), left_w));
-                        left_lines.push(pad_right(&format!("{ESC}[38;2;60;60;80m{} {ESC}[0m", "━".repeat(left_w)), left_w));
+                        left_lines.push(pad_right(&format!("{ESC}[38;2;60;60;80m{}{ESC}[0m", "━".repeat(left_w)), left_w));
                         left_lines.push(pad_right("", left_w));
 
                         let slug_active = prompt.step == PromptStep::Slug;
@@ -1115,7 +1115,7 @@ pub fn run_dashboard(
                     } else {
                         // Regular custom list mode
                         left_lines.push(pad_right(&format!("{ESC}[38;2;90;90;120m[n] Create New     [d] Delete selected{ESC}[0m"), left_w));
-                        left_lines.push(pad_right(&format!("{ESC}[38;2;45;45;65m{} {ESC}[0m", "╌".repeat(left_w)), left_w));
+                        left_lines.push(pad_right(&format!("{ESC}[38;2;45;45;65m{}{ESC}[0m", "╌".repeat(left_w)), left_w));
 
                         let list_rows = body_h.saturating_sub(2);
                         let offset = if selected_custom_idx >= list_rows {
@@ -1195,14 +1195,19 @@ pub fn run_dashboard(
 
             // Draw upper box: live fire preview
             let prev_title = " Live Fire Preview ";
-            let prev_top = format!("╭─{}{}{}╮", prev_title, "─".repeat(right_w.saturating_sub(prev_title.len() + 4)), "─");
+            let prev_top = format!(
+                "╭─{}{}{}╮",
+                prev_title,
+                "─".repeat(right_w.saturating_sub(prev_title.len() + 4)),
+                "─"
+            );
             right_lines.push(format!("{ESC}[38;2;60;60;85m{}{ESC}[0m", prev_top));
 
             let fire_lines = preview_fire.render_lines(&preview_pal);
             for fire_line in fire_lines {
                 right_lines.push(format!(
                     "{ESC}[38;2;60;60;85m│{ESC}[0m {} {ESC}[38;2;60;60;85m│{ESC}[0m",
-                    pad_right(&fire_line, right_w.saturating_sub(2))
+                    pad_right(&fire_line, right_w.saturating_sub(4))
                 ));
             }
             let prev_bot = format!("╰{}╯", "─".repeat(right_w.saturating_sub(2)));
@@ -1223,7 +1228,7 @@ pub fn run_dashboard(
                 let text = if i < spec_content.len() { &spec_content[i] } else { "" };
                 right_lines.push(format!(
                     "{ESC}[38;2;60;60;85m│{ESC}[0m  {}  {ESC}[38;2;60;60;85m│{ESC}[0m",
-                    pad_right(text, right_w.saturating_sub(4))
+                    pad_right(text, right_w.saturating_sub(6))
                 ));
             }
             let specs_bot = format!("╰{}╯", "─".repeat(right_w.saturating_sub(2)));
