@@ -169,11 +169,33 @@ fn clear_unburned(buf: &mut String, burned: &[bool], cols: usize, rows: usize) {
     let _ = write!(buf, "{ESC}[0m");
 }
 
-fn resize_grid(cols: usize, rows: usize, top_down: bool) -> Vec<u8> {
+fn resize_grid(cols: usize, rows: usize, direction: u8) -> Vec<u8> {
     let mut grid = vec![0u8; cols * rows];
-    let source_row = if top_down { 0 } else { rows - 1 };
-    for x in 0..cols {
-        grid[source_row * cols + x] = MAX_HEAT;
+    match direction {
+        1 => {
+            // Top → Bottom: seed top row
+            for x in 0..cols {
+                grid[x] = MAX_HEAT;
+            }
+        }
+        2 => {
+            // Left → Right: seed left column
+            for y in 0..rows {
+                grid[y * cols] = MAX_HEAT;
+            }
+        }
+        3 => {
+            // Right → Left: seed right column
+            for y in 0..rows {
+                grid[y * cols + (cols - 1)] = MAX_HEAT;
+            }
+        }
+        _ => {
+            // Bottom → Top (default): seed bottom row
+            for x in 0..cols {
+                grid[(rows - 1) * cols + x] = MAX_HEAT;
+            }
+        }
     }
     grid
 }
@@ -199,7 +221,7 @@ pub fn burn(palette: &Palette, settings: &AnimSettings, interrupted: Arc<AtomicB
     let source_cool_at = max_duration.mul_f32(settings.flames_duration);
     let mut frame = String::with_capacity(cols * rows * 8);
     let frame_delay = Duration::from_millis(1000 / settings.fps.max(1) as u64);
-    let top_down = settings.direction;
+    let direction = settings.direction;
 
     loop {
         if interrupted.load(Ordering::Relaxed) {
@@ -216,91 +238,161 @@ pub fn burn(palette: &Palette, settings: &AnimSettings, interrupted: Arc<AtomicB
         if new_cols != cols || new_rows != rows {
             cols = new_cols;
             rows = new_rows;
-            grid = resize_grid(cols, rows, top_down);
+            grid = resize_grid(cols, rows, direction);
             burned = vec![false; cols * rows];
             frame.reserve(cols * rows * 8);
         }
 
-        // Refresh source row while below cool-down threshold
-        let source_row = if top_down { 0 } else { rows - 1 };
+        // Refresh source edge while below cool-down threshold
         if elapsed <= source_cool_at {
-            for x in 0..cols {
-                grid[source_row * cols + x] = MAX_HEAT;
+            match direction {
+                1 => {
+                    for x in 0..cols { grid[x] = MAX_HEAT; }
+                }
+                2 => {
+                    for y in 0..rows { grid[y * cols] = MAX_HEAT; }
+                }
+                3 => {
+                    for y in 0..rows { grid[y * cols + (cols - 1)] = MAX_HEAT; }
+                }
+                _ => {
+                    for x in 0..cols { grid[(rows - 1) * cols + x] = MAX_HEAT; }
+                }
             }
         }
 
         // Propagation steps
         for _ in 0..STEPS_PER_FRAME {
-            if top_down {
-                // Heat flows downward: row y radiates into row y+1
-                for x in 0..cols {
-                    for y in 0..rows - 1 {
-                        let above = grid[y * cols + x];
-
-                        let decay = match settings.height {
-                            0 => rng.range(1, 4), // Low
-                            1 => rng.range(0, 3), // Medium
-                            2 => rng.range(0, 2), // High
-                            3 => rng.range(0, 1), // Extreme
-                            _ => rng.range(0, 3),
-                        };
-
-                        let drift = match settings.wind {
-                            -2 => rng.range(-2, 0), // Strong Left
-                            -1 => rng.range(-1, 0), // Gentle Left
-                            0 => rng.range(-1, 1),  // None
-                            1 => rng.range(0, 1),   // Gentle Right
-                            2 => rng.range(0, 2),   // Strong Right
-                            _ => rng.range(-1, 1),
-                        };
-
-                        let nx = (x as i32 + drift).clamp(0, cols as i32 - 1) as usize;
-                        let new_val = (above as i32 - decay).max(0) as u8;
-                        grid[(y + 1) * cols + nx] = new_val;
-                    }
-                }
-
-                if elapsed > source_cool_at {
+            match direction {
+                1 => {
+                    // Top → Bottom: row y radiates into row y+1
                     for x in 0..cols {
-                        let idx = x; // top row (row 0)
-                        let dec = rng.range(2, 6);
-                        grid[idx] = (grid[idx] as i32 - dec).max(0) as u8;
+                        for y in 0..rows - 1 {
+                            let above = grid[y * cols + x];
+                            let decay = match settings.height {
+                                0 => rng.range(1, 4),
+                                1 => rng.range(0, 3),
+                                2 => rng.range(0, 2),
+                                3 => rng.range(0, 1),
+                                _ => rng.range(0, 3),
+                            };
+                            let drift = match settings.wind {
+                                -2 => rng.range(-2, 0),
+                                -1 => rng.range(-1, 0),
+                                0  => rng.range(-1, 1),
+                                1  => rng.range(0, 1),
+                                2  => rng.range(0, 2),
+                                _  => rng.range(-1, 1),
+                            };
+                            let nx = (x as i32 + drift).clamp(0, cols as i32 - 1) as usize;
+                            let new_val = (above as i32 - decay).max(0) as u8;
+                            grid[(y + 1) * cols + nx] = new_val;
+                        }
+                    }
+                    if elapsed > source_cool_at {
+                        for x in 0..cols {
+                            let dec = rng.range(2, 6);
+                            grid[x] = (grid[x] as i32 - dec).max(0) as u8; // top row
+                        }
                     }
                 }
-            } else {
-                // Heat flows upward: row y radiates into row y-1 (original behaviour)
-                for x in 0..cols {
-                    for y in 1..rows {
-                        let below = grid[y * cols + x];
-
-                        let decay = match settings.height {
-                            0 => rng.range(1, 4), // Low
-                            1 => rng.range(0, 3), // Medium
-                            2 => rng.range(0, 2), // High
-                            3 => rng.range(0, 1), // Extreme
-                            _ => rng.range(0, 3),
-                        };
-
-                        let drift = match settings.wind {
-                            -2 => rng.range(-2, 0), // Strong Left
-                            -1 => rng.range(-1, 0), // Gentle Left
-                            0 => rng.range(-1, 1),  // None
-                            1 => rng.range(0, 1),   // Gentle Right
-                            2 => rng.range(0, 2),   // Strong Right
-                            _ => rng.range(-1, 1),
-                        };
-
-                        let nx = (x as i32 + drift).clamp(0, cols as i32 - 1) as usize;
-                        let new_val = (below as i32 - decay).max(0) as u8;
-                        grid[(y - 1) * cols + nx] = new_val;
+                2 => {
+                    // Left → Right: col x radiates into col x+1; drift shifts row
+                    for y in 0..rows {
+                        for x in 0..cols - 1 {
+                            let left = grid[y * cols + x];
+                            let decay = match settings.height {
+                                0 => rng.range(1, 4),
+                                1 => rng.range(0, 3),
+                                2 => rng.range(0, 2),
+                                3 => rng.range(0, 1),
+                                _ => rng.range(0, 3),
+                            };
+                            // wind causes vertical drift for horizontal fire
+                            let drift = match settings.wind {
+                                -2 => rng.range(-2, 0),
+                                -1 => rng.range(-1, 0),
+                                0  => rng.range(-1, 1),
+                                1  => rng.range(0, 1),
+                                2  => rng.range(0, 2),
+                                _  => rng.range(-1, 1),
+                            };
+                            let ny = (y as i32 + drift).clamp(0, rows as i32 - 1) as usize;
+                            let new_val = (left as i32 - decay).max(0) as u8;
+                            grid[ny * cols + (x + 1)] = new_val;
+                        }
+                    }
+                    if elapsed > source_cool_at {
+                        for y in 0..rows {
+                            let dec = rng.range(2, 6);
+                            grid[y * cols] = (grid[y * cols] as i32 - dec).max(0) as u8; // left col
+                        }
                     }
                 }
-
-                if elapsed > source_cool_at {
+                3 => {
+                    // Right → Left: col x radiates into col x-1; drift shifts row
+                    for y in 0..rows {
+                        for x in (1..cols).rev() {
+                            let right = grid[y * cols + x];
+                            let decay = match settings.height {
+                                0 => rng.range(1, 4),
+                                1 => rng.range(0, 3),
+                                2 => rng.range(0, 2),
+                                3 => rng.range(0, 1),
+                                _ => rng.range(0, 3),
+                            };
+                            let drift = match settings.wind {
+                                -2 => rng.range(-2, 0),
+                                -1 => rng.range(-1, 0),
+                                0  => rng.range(-1, 1),
+                                1  => rng.range(0, 1),
+                                2  => rng.range(0, 2),
+                                _  => rng.range(-1, 1),
+                            };
+                            let ny = (y as i32 + drift).clamp(0, rows as i32 - 1) as usize;
+                            let new_val = (right as i32 - decay).max(0) as u8;
+                            grid[ny * cols + (x - 1)] = new_val;
+                        }
+                    }
+                    if elapsed > source_cool_at {
+                        for y in 0..rows {
+                            let idx = y * cols + (cols - 1);
+                            let dec = rng.range(2, 6);
+                            grid[idx] = (grid[idx] as i32 - dec).max(0) as u8; // right col
+                        }
+                    }
+                }
+                _ => {
+                    // Bottom → Top: row y radiates into row y-1 (default)
                     for x in 0..cols {
-                        let idx = (rows - 1) * cols + x;
-                        let dec = rng.range(2, 6);
-                        grid[idx] = (grid[idx] as i32 - dec).max(0) as u8;
+                        for y in 1..rows {
+                            let below = grid[y * cols + x];
+                            let decay = match settings.height {
+                                0 => rng.range(1, 4),
+                                1 => rng.range(0, 3),
+                                2 => rng.range(0, 2),
+                                3 => rng.range(0, 1),
+                                _ => rng.range(0, 3),
+                            };
+                            let drift = match settings.wind {
+                                -2 => rng.range(-2, 0),
+                                -1 => rng.range(-1, 0),
+                                0  => rng.range(-1, 1),
+                                1  => rng.range(0, 1),
+                                2  => rng.range(0, 2),
+                                _  => rng.range(-1, 1),
+                            };
+                            let nx = (x as i32 + drift).clamp(0, cols as i32 - 1) as usize;
+                            let new_val = (below as i32 - decay).max(0) as u8;
+                            grid[(y - 1) * cols + nx] = new_val;
+                        }
+                    }
+                    if elapsed > source_cool_at {
+                        for x in 0..cols {
+                            let idx = (rows - 1) * cols + x;
+                            let dec = rng.range(2, 6);
+                            grid[idx] = (grid[idx] as i32 - dec).max(0) as u8; // bottom row
+                        }
                     }
                 }
             }

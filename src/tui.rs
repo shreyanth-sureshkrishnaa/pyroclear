@@ -255,59 +255,121 @@ impl PreviewFire {
         }
         // Run 2 propagation steps per tick to match the real fire speed
         for _ in 0..2 {
-            // set heat source
-            let source_row = if settings.direction { 0 } else { self.rows - 1 };
-            for x in 0..self.cols {
-                self.grid[source_row * self.cols + x] = 36;
-            }
-
-            // propagate heat
-            if settings.direction {
-                for x in 0..self.cols {
-                    for y in 0..self.rows - 1 {
-                        let above = self.grid[y * self.cols + x];
-                        let decay = match settings.height {
-                            0 => rng.range(1, 4),
-                            1 => rng.range(0, 3),
-                            2 => rng.range(0, 2),
-                            3 => rng.range(0, 1),
-                            _ => rng.range(0, 3),
-                        };
-                        let drift = match settings.wind {
-                            -2 => rng.range(-2, 0),
-                            -1 => rng.range(-1, 0),
-                            0 => rng.range(-1, 1),
-                            1 => rng.range(0, 1),
-                            2 => rng.range(0, 2),
-                            _ => rng.range(-1, 1),
-                        };
-                        let nx = (x as i32 + drift).clamp(0, self.cols as i32 - 1) as usize;
-                        let new_val = (above as i32 - decay).max(0) as u8;
-                        self.grid[(y + 1) * self.cols + nx] = new_val;
+            match settings.direction {
+                1 => {
+                    // Top → Bottom: seed top row, heat flows downward
+                    for x in 0..self.cols {
+                        self.grid[x] = 36;
+                    }
+                    for x in 0..self.cols {
+                        for y in 0..self.rows - 1 {
+                            let above = self.grid[y * self.cols + x];
+                            let decay = match settings.height {
+                                0 => rng.range(1, 4),
+                                1 => rng.range(0, 3),
+                                2 => rng.range(0, 2),
+                                3 => rng.range(0, 1),
+                                _ => rng.range(0, 3),
+                            };
+                            let drift = match settings.wind {
+                                -2 => rng.range(-2, 0),
+                                -1 => rng.range(-1, 0),
+                                0  => rng.range(-1, 1),
+                                1  => rng.range(0, 1),
+                                2  => rng.range(0, 2),
+                                _  => rng.range(-1, 1),
+                            };
+                            let nx = (x as i32 + drift).clamp(0, self.cols as i32 - 1) as usize;
+                            let new_val = (above as i32 - decay).max(0) as u8;
+                            self.grid[(y + 1) * self.cols + nx] = new_val;
+                        }
                     }
                 }
-            } else {
-                for x in 0..self.cols {
-                    for y in 1..self.rows {
-                        let below = self.grid[y * self.cols + x];
-                        let decay = match settings.height {
-                            0 => rng.range(1, 4),
-                            1 => rng.range(0, 3),
-                            2 => rng.range(0, 2),
-                            3 => rng.range(0, 1),
-                            _ => rng.range(0, 3),
-                        };
-                        let drift = match settings.wind {
-                            -2 => rng.range(-2, 0),
-                            -1 => rng.range(-1, 0),
-                            0 => rng.range(-1, 1),
-                            1 => rng.range(0, 1),
-                            2 => rng.range(0, 2),
-                            _ => rng.range(-1, 1),
-                        };
-                        let nx = (x as i32 + drift).clamp(0, self.cols as i32 - 1) as usize;
-                        let new_val = (below as i32 - decay).max(0) as u8;
-                        self.grid[(y - 1) * self.cols + nx] = new_val;
+                2 => {
+                    // Left → Right: seed left column, heat flows rightward; drift shifts row
+                    for y in 0..self.rows {
+                        self.grid[y * self.cols] = 36;
+                    }
+                    for y in 0..self.rows {
+                        for x in 0..self.cols - 1 {
+                            let left = self.grid[y * self.cols + x];
+                            let decay = match settings.height {
+                                0 => rng.range(1, 4),
+                                1 => rng.range(0, 3),
+                                2 => rng.range(0, 2),
+                                3 => rng.range(0, 1),
+                                _ => rng.range(0, 3),
+                            };
+                            let drift = match settings.wind {
+                                -2 => rng.range(-2, 0),
+                                -1 => rng.range(-1, 0),
+                                0  => rng.range(-1, 1),
+                                1  => rng.range(0, 1),
+                                2  => rng.range(0, 2),
+                                _  => rng.range(-1, 1),
+                            };
+                            let ny = (y as i32 + drift).clamp(0, self.rows as i32 - 1) as usize;
+                            let new_val = (left as i32 - decay).max(0) as u8;
+                            self.grid[ny * self.cols + (x + 1)] = new_val;
+                        }
+                    }
+                }
+                3 => {
+                    // Right → Left: seed right column, heat flows leftward; drift shifts row
+                    for y in 0..self.rows {
+                        self.grid[y * self.cols + (self.cols - 1)] = 36;
+                    }
+                    for y in 0..self.rows {
+                        for x in (1..self.cols).rev() {
+                            let right = self.grid[y * self.cols + x];
+                            let decay = match settings.height {
+                                0 => rng.range(1, 4),
+                                1 => rng.range(0, 3),
+                                2 => rng.range(0, 2),
+                                3 => rng.range(0, 1),
+                                _ => rng.range(0, 3),
+                            };
+                            let drift = match settings.wind {
+                                -2 => rng.range(-2, 0),
+                                -1 => rng.range(-1, 0),
+                                0  => rng.range(-1, 1),
+                                1  => rng.range(0, 1),
+                                2  => rng.range(0, 2),
+                                _  => rng.range(-1, 1),
+                            };
+                            let ny = (y as i32 + drift).clamp(0, self.rows as i32 - 1) as usize;
+                            let new_val = (right as i32 - decay).max(0) as u8;
+                            self.grid[ny * self.cols + (x - 1)] = new_val;
+                        }
+                    }
+                }
+                _ => {
+                    // Bottom → Top (default): seed bottom row, heat flows upward
+                    for x in 0..self.cols {
+                        self.grid[(self.rows - 1) * self.cols + x] = 36;
+                    }
+                    for x in 0..self.cols {
+                        for y in 1..self.rows {
+                            let below = self.grid[y * self.cols + x];
+                            let decay = match settings.height {
+                                0 => rng.range(1, 4),
+                                1 => rng.range(0, 3),
+                                2 => rng.range(0, 2),
+                                3 => rng.range(0, 1),
+                                _ => rng.range(0, 3),
+                            };
+                            let drift = match settings.wind {
+                                -2 => rng.range(-2, 0),
+                                -1 => rng.range(-1, 0),
+                                0  => rng.range(-1, 1),
+                                1  => rng.range(0, 1),
+                                2  => rng.range(0, 2),
+                                _  => rng.range(-1, 1),
+                            };
+                            let nx = (x as i32 + drift).clamp(0, self.cols as i32 - 1) as usize;
+                            let new_val = (below as i32 - decay).max(0) as u8;
+                            self.grid[(y - 1) * self.cols + nx] = new_val;
+                        }
                     }
                 }
             }
@@ -724,7 +786,7 @@ pub fn run_dashboard(
                                 settings.height = if settings.height > 0 { settings.height - 1 } else { 3 };
                             }
                             3 => {
-                                settings.direction = !settings.direction;
+                                settings.direction = settings.direction.wrapping_add(3) % 4;
                             }
                             4 => {
                                 if let Some(idx) = duration_options.iter().position(|&x| x == settings.flames_duration) {
@@ -754,7 +816,7 @@ pub fn run_dashboard(
                                 settings.height = if settings.height < 3 { settings.height + 1 } else { 0 };
                             }
                             3 => {
-                                settings.direction = !settings.direction;
+                                settings.direction = (settings.direction + 1) % 4;
                             }
                             4 => {
                                 if let Some(idx) = duration_options.iter().position(|&x| x == settings.flames_duration) {
@@ -1041,7 +1103,12 @@ pub fn run_dashboard(
 
                     left_lines.push(format_setting_row(
                         "Fire Direction",
-                        if settings.direction { "Top → Bottom" } else { "Bottom → Top" },
+                        match settings.direction {
+                            1 => "Top → Bottom",
+                            2 => "Left → Right",
+                            3 => "Right → Left",
+                            _ => "Bottom → Top",
+                        },
                         selected_setting_idx == 3,
                     ));
                     left_lines.push(pad_right("", left_w));
