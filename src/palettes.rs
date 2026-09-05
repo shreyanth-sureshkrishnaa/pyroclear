@@ -3746,6 +3746,20 @@ pub const NAMED_PALETTES: &[(&str, &str, &str, &str, &str)] = &[
         "#0a1400",
         "#d0ff40",
     ),
+    (
+        "rachhiato",
+        "Rachhiato",
+        "soft strawberry pink → warm coffee brown",
+        "#EFCEDB",
+        "#3C2218",
+    ),
+    (
+        "matchalatte",
+        "Matcha Latte",
+        "soft pink → grassy matcha green",
+        "#F47FA0",
+        "#8FBD35",
+    ),
 ];
 
 // ── Color math ────────────────────────────────────────────────────────

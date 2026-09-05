@@ -352,7 +352,12 @@ pub fn build_palette(choice: &PaletteChoice) -> Palette {
         },
         PaletteChoice::Custom { from, to } => generate_palette(*from, *to),
     };
-    soften(&raw, SOFTEN_DESATURATE, SOFTEN_BRIGHTEN)
+
+    if matches!(choice, PaletteChoice::Named(name) if name == "rachhiato") {
+        soften(&raw, 1.0, SOFTEN_BRIGHTEN)
+    } else {
+        soften(&raw, SOFTEN_DESATURATE, SOFTEN_BRIGHTEN)
+    }
 }
 
 // ── CLI argument parsing ──────────────────────────────────────────────
