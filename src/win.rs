@@ -40,8 +40,32 @@ struct ConsoleScreenBufferInfo {
     dw_maximum_window_size: Coord,
 }
 
+/// KEY_EVENT_RECORD; the other INPUT_RECORD variants fit in the same 16 bytes.
+#[repr(C)]
+struct KeyEventRecord {
+    key_down: i32,
+    repeat_count: u16,
+    virtual_key_code: u16,
+    virtual_scan_code: u16,
+    unicode_char: u16,
+    control_key_state: u32,
+}
+
+/// INPUT_RECORD: an event type tag, then the event union (at offset 4).
+#[repr(C)]
+struct InputRecord {
+    event_type: u16,
+    event: KeyEventRecord,
+}
+
+const KEY_EVENT: u16 = 0x0001;
+const WAIT_OBJECT_0: u32 = 0;
+
 extern "system" {
     fn GetStdHandle(n_std_handle: u32) -> *mut c_void;
+    fn WaitForSingleObject(h_handle: *mut c_void, dw_milliseconds: u32) -> u32;
+    fn PeekConsoleInputW(h: *mut c_void, buf: *mut InputRecord, len: u32, read: *mut u32) -> i32;
+    fn ReadConsoleInputW(h: *mut c_void, buf: *mut InputRecord, len: u32, read: *mut u32) -> i32;
     fn GetConsoleMode(h_console: *mut c_void, lp_mode: *mut u32) -> i32;
     fn SetConsoleMode(h_console: *mut c_void, dw_mode: u32) -> i32;
     fn GetConsoleScreenBufferInfo(
@@ -94,6 +118,44 @@ pub fn leave_raw(saved: &RawConsole) {
         SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), saved.in_mode);
         if saved.out_saved {
             SetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), saved.out_mode);
+        }
+    }
+}
+
+// ── Key polling ───────────────────────────────────────────────────────
+
+/// Waits up to `timeout` for a key press that `stdin().read()` will return.
+///
+/// The console input handle is signaled by *any* input event: key releases
+/// (such as the Enter release left over from launching the command), mouse,
+/// focus and resize events. `read()` skips those and blocks until a real key
+/// press, which froze the TUI before its first frame. So non-key-press events
+/// are drained here, and only a key press with a character counts.
+pub fn wait_for_key(timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    unsafe {
+        let hin = GetStdHandle(STD_INPUT_HANDLE);
+        if hin.is_null() {
+            return false;
+        }
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if WaitForSingleObject(hin, left.as_millis() as u32) != WAIT_OBJECT_0 {
+                return false; // timed out (or failed)
+            }
+            let mut rec: InputRecord = std::mem::zeroed();
+            let mut n = 0u32;
+            if PeekConsoleInputW(hin, &mut rec, 1, &mut n) == 0 || n == 0 {
+                return false;
+            }
+            // With VT input on, arrows and other keys also arrive as characters.
+            if rec.event_type == KEY_EVENT && rec.event.key_down != 0 && rec.event.unicode_char != 0 {
+                return true;
+            }
+            ReadConsoleInputW(hin, &mut rec, 1, &mut n); // drop the event, keep waiting
+            if left.is_zero() {
+                return false;
+            }
         }
     }
 }

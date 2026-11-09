@@ -131,6 +131,10 @@ pub fn print_help() {
             "--from <hex> --to <hex>",
             "Custom gradient (saved for future runs)",
         ),
+        (
+            "--effect <name>",
+            "fire, wave, vortex, explosion, random (saved)",
+        ),
         ("--pick,   -p", "Interactive TUI color picker"),
         ("--settings, -s", "Interactive TUI settings page"),
         ("--custom", "Interactive custom palette manager (TUI)"),
@@ -168,6 +172,7 @@ pub fn print_help() {
         ("pyroclear --start", "interactive guide & onboarding"),
         ("pyroclear", "burn with saved / default palette"),
         ("pyroclear --color ocean", "burn ocean & save it"),
+        ("pyroclear --effect wave --color ocean", "wash the screen away"),
         (
             "pyroclear --settings",
             "configure speed, wind, height decay",

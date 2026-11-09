@@ -2,7 +2,7 @@
 
 use crate::{
     config::{AnimSettings, PaletteChoice},
-    engine::{terminal_size, Rng},
+    engine::{terminal_size, Rng, Sweep},
     palettes::*,
     ESC,
 };
@@ -201,27 +201,8 @@ fn poll_stdin(timeout: Duration) -> io::Result<bool> {
 }
 
 #[cfg(windows)]
-extern "system" {
-    fn WaitForSingleObject(h_handle: *mut std::ffi::c_void, dw_milliseconds: u32) -> u32;
-    fn GetStdHandle(n_std_handle: u32) -> *mut std::ffi::c_void;
-}
-
-#[cfg(windows)]
-const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
-#[cfg(windows)]
-const WAIT_OBJECT_0: u32 = 0x00000000;
-
-#[cfg(windows)]
 fn poll_stdin(timeout: Duration) -> io::Result<bool> {
-    unsafe {
-        let hin = GetStdHandle(STD_INPUT_HANDLE);
-        if hin.is_null() {
-            return Ok(false);
-        }
-        let ms = timeout.as_millis() as u32;
-        let res = WaitForSingleObject(hin, ms);
-        Ok(res == WAIT_OBJECT_0)
-    }
+    Ok(crate::win::wait_for_key(timeout))
 }
 
 // ── Live Fire Preview State ──────────────────────────────────────────
@@ -458,6 +439,228 @@ struct PromptState {
 
 // ── Setting Rows Helper ──────────────────────────────────────────────
 
+/// `--effect` values in the order the Effect row cycles through them.
+const EFFECT_OPTIONS: [&str; 5] = ["fire", "wave", "vortex", "explosion", "random"];
+
+/// One row of the Physics Settings tab.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Row {
+    Effect,
+    Fps,
+    Wind,
+    FlameHeight,
+    FireDirection,
+    FireDecay,
+    WaveSpeed,
+    WaveAngle,
+    VortexDirection,
+    VortexSpeed,
+    VortexRotation,
+    ExplosionCount,
+    ExplosionSpeed,
+    ExplosionRhythm,
+    Debris,
+    RunDuration,
+}
+
+/// Rows shown for an effect, top to bottom: only the settings that effect
+/// uses. `random` may run any effect, so it shows every row.
+fn visible_settings(effect: &str) -> Vec<Row> {
+    const FIRE: [Row; 4] = [Row::Wind, Row::FlameHeight, Row::FireDirection, Row::FireDecay];
+    const WAVE: [Row; 2] = [Row::WaveSpeed, Row::WaveAngle];
+    const VORTEX: [Row; 3] = [Row::VortexDirection, Row::VortexSpeed, Row::VortexRotation];
+    const EXPLOSION: [Row; 4] =
+        [Row::ExplosionCount, Row::ExplosionSpeed, Row::ExplosionRhythm, Row::Debris];
+    let mut rows = vec![Row::Effect, Row::Fps];
+    match effect {
+        "fire" => rows.extend(FIRE),
+        "wave" => rows.extend(WAVE),
+        "vortex" => rows.extend(VORTEX),
+        "explosion" => rows.extend(EXPLOSION),
+        _ => {
+            rows.extend(FIRE);
+            rows.extend(WAVE);
+            rows.extend(VORTEX);
+            rows.extend(EXPLOSION);
+        }
+    }
+    rows.push(Row::RunDuration);
+    rows
+}
+
+fn speed_label(speed: u8) -> &'static str {
+    match speed {
+        1 => "Very Slow",
+        2 => "Slow",
+        4 => "Fast",
+        5 => "Very Fast",
+        _ => "Normal",
+    }
+}
+
+/// (label, current value) of a settings row.
+fn setting_row(row: Row, s: &AnimSettings) -> (&'static str, String) {
+    match row {
+        Row::Effect => {
+            let name = match s.effect.as_str() {
+                "wave" => "Wave",
+                "vortex" => "Vortex",
+                "explosion" => "Explosion",
+                "random" => "Random",
+                _ => "Fire",
+            };
+            ("Effect", name.to_string())
+        }
+        Row::Fps => ("FPS / Speed", format!("{} fps", s.fps)),
+        Row::Wind => {
+            let wind = match s.wind {
+                -2 => "Strong Left",
+                -1 => "Gentle Left",
+                1 => "Gentle Right",
+                2 => "Strong Right",
+                _ => "None",
+            };
+            ("Wind / Breeze", wind.to_string())
+        }
+        Row::FlameHeight => {
+            let height = match s.height {
+                0 => "Low",
+                2 => "High",
+                3 => "Extreme",
+                _ => "Medium",
+            };
+            ("Flame Height", height.to_string())
+        }
+        Row::FireDirection => {
+            let direction = match s.direction {
+                1 => "Top → Bottom",
+                2 => "Left → Right",
+                3 => "Right → Left",
+                _ => "Bottom → Top",
+            };
+            ("Fire Direction", direction.to_string())
+        }
+        Row::FireDecay => {
+            let decay = match s.flames_duration {
+                0.10 => "Very Fast",
+                0.20 => "Fast",
+                0.38 => "Default",
+                0.50 => "Slow",
+                0.70 => "Very Slow",
+                _ => "Normal",
+            };
+            ("Fire Decay", decay.to_string())
+        }
+        Row::WaveSpeed => ("Wave Speed", speed_label(s.wave_speed).to_string()),
+        Row::WaveAngle => {
+            let angle = match s.wave_angle {
+                0 => "Level".to_string(),
+                a if a < 0 => format!("{}° (left ahead)", -a),
+                a => format!("{a}° (right ahead)"),
+            };
+            ("Wave Angle", angle)
+        }
+        Row::VortexDirection => {
+            let direction = if s.vortex_outward { "Center → Edges" } else { "Edges → Center" };
+            ("Vortex Direction", direction.to_string())
+        }
+        Row::VortexSpeed => ("Vortex Speed", speed_label(s.vortex_speed).to_string()),
+        Row::VortexRotation => {
+            let rotation = if s.vortex_clockwise { "Clockwise" } else { "Counter-clockwise" };
+            ("Vortex Rotation", rotation.to_string())
+        }
+        Row::ExplosionCount => {
+            let count = match s.explosion_count {
+                1 => "Single",
+                2 => "Few",
+                4 => "Many",
+                5 => "Barrage",
+                _ => "Some",
+            };
+            ("Explosions", count.to_string())
+        }
+        Row::ExplosionSpeed => ("Explosion Speed", speed_label(s.explosion_speed).to_string()),
+        Row::ExplosionRhythm => {
+            let rhythm = match s.explosion_rhythm {
+                0 => "Together",
+                2 => "Chain",
+                _ => "Staggered",
+            };
+            ("Explosion Rhythm", rhythm.to_string())
+        }
+        Row::Debris => {
+            let debris = match s.explosion_debris {
+                0 => "None",
+                2 => "Lots",
+                _ => "Some",
+            };
+            ("Debris", debris.to_string())
+        }
+        Row::RunDuration => ("Duration", format!("{:.1}s", s.duration)),
+    }
+}
+
+/// Steps `v` one notch through `min..=max`, wrapping around at either end.
+fn cycle(v: i32, min: i32, max: i32, forward: bool) -> i32 {
+    match (forward, v) {
+        (true, v) if v < max => v + 1,
+        (true, _) => min,
+        (false, v) if v > min => v - 1,
+        (false, _) => max,
+    }
+}
+
+/// Steps to the neighbor of `v` in `options`, wrapping around; a value not
+/// in the list is left as is.
+fn cycle_in<T: Copy + PartialEq>(options: &[T], v: T, forward: bool) -> T {
+    match options.iter().position(|&o| o == v) {
+        Some(i) => options[cycle(i as i32, 0, options.len() as i32 - 1, forward) as usize],
+        None => v,
+    }
+}
+
+/// Left (`forward` = false) / Right (true) on a settings row.
+fn adjust(row: Row, s: &mut AnimSettings, forward: bool) {
+    const FPS_OPTIONS: [u32; 7] = [15, 30, 45, 60, 75, 90, 120];
+    const DECAY_OPTIONS: [f32; 6] = [0.10, 0.20, 0.30, 0.38, 0.50, 0.70];
+    let step = |v: u8, min: i32, max: i32| cycle(v as i32, min, max, forward) as u8;
+    match row {
+        Row::Effect => s.effect = cycle_in(&EFFECT_OPTIONS, s.effect.as_str(), forward).to_string(),
+        Row::Fps => s.fps = cycle_in(&FPS_OPTIONS, s.fps, forward),
+        Row::Wind => s.wind = cycle(s.wind, -2, 2, forward),
+        Row::FlameHeight => s.height = cycle(s.height, 0, 3, forward),
+        Row::FireDirection => s.direction = step(s.direction, 0, 3),
+        Row::FireDecay => s.flames_duration = cycle_in(&DECAY_OPTIONS, s.flames_duration, forward),
+        Row::WaveSpeed => s.wave_speed = step(s.wave_speed, 1, 5),
+        // 10° steps; also snaps a hand-edited value (say 25°) onto the range.
+        Row::WaveAngle => {
+            s.wave_angle = match forward {
+                true if s.wave_angle < 30 => (s.wave_angle + 10).min(30),
+                true => -30,
+                false if s.wave_angle > -30 => (s.wave_angle - 10).max(-30),
+                false => 30,
+            }
+        }
+        Row::VortexDirection => s.vortex_outward = !s.vortex_outward,
+        Row::VortexSpeed => s.vortex_speed = step(s.vortex_speed, 1, 5),
+        Row::VortexRotation => s.vortex_clockwise = !s.vortex_clockwise,
+        Row::ExplosionCount => s.explosion_count = step(s.explosion_count, 1, 5),
+        Row::ExplosionSpeed => s.explosion_speed = step(s.explosion_speed, 1, 5),
+        Row::ExplosionRhythm => s.explosion_rhythm = step(s.explosion_rhythm, 0, 2),
+        Row::Debris => s.explosion_debris = step(s.explosion_debris, 0, 2),
+        // 0.1 s steps between 0.1 and 5.0 s, wrapping around.
+        Row::RunDuration => {
+            let next = ((s.duration + if forward { 0.1 } else { -0.1 }) * 10.0).round() / 10.0;
+            s.duration = match forward {
+                true if next <= 5.0 => next,
+                true => 0.1,
+                false if next >= 0.1 => next,
+                false => 5.0,
+            }
+        }
+    }
+}
+
 fn format_setting_row(label: &str, value: &str, is_selected: bool) -> String {
     let indicator = if is_selected {
         format!("{ESC}[1;38;2;255;200;80m▸ {ESC}[0m")
@@ -527,6 +730,7 @@ pub fn run_dashboard(
     // Pre-calculate preview grid sizing based on starting window size
     let (mut cols, mut rows) = terminal_size();
     let mut preview_fire = PreviewFire::new(10, 10);
+    let preview_start = Instant::now(); // clock for looping sweep effects in the preview
     let mut last_tick = Instant::now();
 
     // Set initial selection if an initial choice was supplied
@@ -731,7 +935,7 @@ pub fn run_dashboard(
                             palette_source_is_custom = false;
                         }
                         1 => {
-                            if selected_setting_idx < 5 {
+                            if selected_setting_idx + 1 < visible_settings(&settings.effect).len() {
                                 selected_setting_idx += 1;
                             }
                         }
@@ -770,64 +974,10 @@ pub fn run_dashboard(
                         }
                         _ => {}
                     },
-                    Key::Left if active_tab == 1 => {
-                        let fps_options = [15, 30, 45, 60, 75, 90, 120];
-                        let duration_options = [0.10, 0.20, 0.30, 0.38, 0.50, 0.70];
-                        match selected_setting_idx {
-                            0 => {
-                                if let Some(idx) = fps_options.iter().position(|&x| x == settings.fps) {
-                                    settings.fps = if idx > 0 { fps_options[idx - 1] } else { fps_options[fps_options.len() - 1] };
-                                }
-                            }
-                            1 => {
-                                settings.wind = if settings.wind > -2 { settings.wind - 1 } else { 2 };
-                            }
-                            2 => {
-                                settings.height = if settings.height > 0 { settings.height - 1 } else { 3 };
-                            }
-                            3 => {
-                                settings.direction = settings.direction.wrapping_add(3) % 4;
-                            }
-                            4 => {
-                                if let Some(idx) = duration_options.iter().position(|&x| x == settings.flames_duration) {
-                                    settings.flames_duration = if idx > 0 { duration_options[idx - 1] } else { duration_options[duration_options.len() - 1] };
-                                }
-                            }
-                            5 => {
-                                let next = ((settings.duration - 0.1) * 10.0).round() / 10.0;
-                                settings.duration = if next >= 0.1 { next } else { 5.0 };
-                            }
-                            _ => {}
-                        }
-                    }
-                    Key::Right if active_tab == 1 => {
-                        let fps_options = [15, 30, 45, 60, 75, 90, 120];
-                        let duration_options = [0.10, 0.20, 0.30, 0.38, 0.50, 0.70];
-                        match selected_setting_idx {
-                            0 => {
-                                if let Some(idx) = fps_options.iter().position(|&x| x == settings.fps) {
-                                    settings.fps = if idx + 1 < fps_options.len() { fps_options[idx + 1] } else { fps_options[0] };
-                                }
-                            }
-                            1 => {
-                                settings.wind = if settings.wind < 2 { settings.wind + 1 } else { -2 };
-                            }
-                            2 => {
-                                settings.height = if settings.height < 3 { settings.height + 1 } else { 0 };
-                            }
-                            3 => {
-                                settings.direction = (settings.direction + 1) % 4;
-                            }
-                            4 => {
-                                if let Some(idx) = duration_options.iter().position(|&x| x == settings.flames_duration) {
-                                    settings.flames_duration = if idx + 1 < duration_options.len() { duration_options[idx + 1] } else { duration_options[0] };
-                                }
-                            }
-                            5 => {
-                                let next = ((settings.duration + 0.1) * 10.0).round() / 10.0;
-                                settings.duration = if next <= 5.0 { next } else { 0.1 };
-                            }
-                            _ => {}
+                    Key::Left | Key::Right if active_tab == 1 => {
+                        let rows = visible_settings(&settings.effect);
+                        if let Some(&row) = rows.get(selected_setting_idx) {
+                            adjust(row, &mut settings, key == Key::Right);
                         }
                     }
                     Key::Enter => {
@@ -1064,76 +1214,17 @@ pub fn run_dashboard(
                     }
                 }
                 1 => {
-                    // Physics Settings Tab
-                    left_lines.push(format_setting_row(
-                        "FPS / Speed",
-                        &format!("{} fps", settings.fps),
-                        selected_setting_idx == 0,
-                    ));
-                    left_lines.push(pad_right("", left_w));
-
-                    let wind_label = match settings.wind {
-                        -2 => "Strong Left",
-                        -1 => "Gentle Left",
-                        0 => "None",
-                        1 => "Gentle Right",
-                        2 => "Strong Right",
-                        _ => "None",
-                    };
-                    left_lines.push(format_setting_row(
-                        "Wind / Breeze",
-                        wind_label,
-                        selected_setting_idx == 1,
-                    ));
-                    left_lines.push(pad_right("", left_w));
-
-                    let height_label = match settings.height {
-                        0 => "Low",
-                        1 => "Medium",
-                        2 => "High",
-                        3 => "Extreme",
-                        _ => "Medium",
-                    };
-                    left_lines.push(format_setting_row(
-                        "Flame Height",
-                        height_label,
-                        selected_setting_idx == 2,
-                    ));
-                    left_lines.push(pad_right("", left_w));
-
-                    left_lines.push(format_setting_row(
-                        "Fire Direction",
-                        match settings.direction {
-                            1 => "Top → Bottom",
-                            2 => "Left → Right",
-                            3 => "Right → Left",
-                            _ => "Bottom → Top",
-                        },
-                        selected_setting_idx == 3,
-                    ));
-                    left_lines.push(pad_right("", left_w));
-
-                    let decay_speed = match settings.flames_duration {
-                        0.10 => "Very Fast",
-                        0.20 => "Fast",
-                        0.30 => "Normal",
-                        0.38 => "Default",
-                        0.50 => "Slow",
-                        0.70 => "Very Slow",
-                        _ => "Normal",
-                    };
-                    left_lines.push(format_setting_row(
-                        "Fire Decay",
-                        decay_speed,
-                        selected_setting_idx == 4,
-                    ));
-                    left_lines.push(pad_right("", left_w));
-
-                    left_lines.push(format_setting_row(
-                        "Duration",
-                        &format!("{:.1}s", settings.duration),
-                        selected_setting_idx == 5,
-                    ));
+                    // Physics Settings Tab: only the rows that matter for the chosen effect.
+                    let rows = visible_settings(&settings.effect);
+                    // Blank spacer lines between rows only while everything still fits.
+                    let spaced = rows.len() * 2 - 1 <= body_h;
+                    for (i, &row) in rows.iter().enumerate() {
+                        if spaced && i > 0 {
+                            left_lines.push(pad_right("", left_w));
+                        }
+                        let (label, value) = setting_row(row, &settings);
+                        left_lines.push(format_setting_row(label, &value, i == selected_setting_idx));
+                    }
 
                     // Fill remainder rows
                     while left_lines.len() < body_h {
@@ -1259,10 +1350,33 @@ pub fn run_dashboard(
 
             let prev_fire_w = right_w.saturating_sub(4);
             preview_fire.resize(prev_fire_w, prev_box_h);
-            preview_fire.tick(&settings, &mut rng);
 
-            // Draw upper box: live fire preview
-            let prev_title = " Live Fire Preview ";
+            // Preview the chosen effect. Sweep effects loop: one run, then a short
+            // dark pause. `random` may run anything, so it previews the fire.
+            let preview_effect = if settings.effect == "random" { "fire" } else { settings.effect.as_str() };
+            let elapsed = preview_start.elapsed().as_secs_f32();
+            let preview_colors = match Sweep::new(preview_effect, &preview_pal, &settings, 0) {
+                Some(first) => {
+                    let period = first.duration * 1.2;
+                    let lap = (elapsed / period) as i32; // new explosion layout every lap
+                    let sweep = if lap == 0 {
+                        first
+                    } else {
+                        Sweep::new(preview_effect, &preview_pal, &settings, lap).unwrap_or(first)
+                    };
+                    let t = ((elapsed % period) / sweep.duration).min(1.0);
+                    let (w, h) = (preview_fire.cols, preview_fire.rows);
+                    sweep.fill(&mut preview_fire.grid, w, h, t, &mut rng);
+                    sweep.palette
+                }
+                None => {
+                    preview_fire.tick(&settings, &mut rng);
+                    preview_pal
+                }
+            };
+
+            // Draw upper box: live effect preview
+            let prev_title = " Live Preview ";
             let prev_top = format!(
                 "╭─{}{}{}╮",
                 prev_title,
@@ -1271,7 +1385,7 @@ pub fn run_dashboard(
             );
             right_lines.push(format!("{ESC}[38;2;60;60;85m{}{ESC}[0m", prev_top));
 
-            let fire_lines = preview_fire.render_lines(&preview_pal);
+            let fire_lines = preview_fire.render_lines(&preview_colors);
             for fire_line in fire_lines {
                 right_lines.push(format!(
                     "{ESC}[38;2;60;60;85m│{ESC}[0m {} {ESC}[38;2;60;60;85m│{ESC}[0m",
@@ -1461,3 +1575,45 @@ pub fn interactive_custom(current_settings: AnimSettings) -> Option<(PaletteChoi
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every effect shows Effect first and Duration last; `random` shows all
+    /// 16 rows once each, every one with its own label.
+    #[test]
+    fn settings_rows_per_effect() {
+        for effect in EFFECT_OPTIONS {
+            let rows = visible_settings(effect);
+            assert_eq!(rows.first(), Some(&Row::Effect), "{effect}");
+            assert_eq!(rows.last(), Some(&Row::RunDuration), "{effect}");
+        }
+        let s = AnimSettings::default();
+        let mut labels: Vec<_> =
+            visible_settings("random").iter().map(|&row| setting_row(row, &s).0).collect();
+        labels.sort();
+        labels.dedup();
+        assert_eq!(labels.len(), 16);
+    }
+
+    /// Right then Left on any row brings its value back; and a few wrap-arounds.
+    #[test]
+    fn adjust_round_trips_and_wraps() {
+        for row in visible_settings("random") {
+            let mut s = AnimSettings::default();
+            let before = setting_row(row, &s).1;
+            adjust(row, &mut s, true);
+            assert_ne!(setting_row(row, &s).1, before, "{row:?} did not change");
+            adjust(row, &mut s, false);
+            assert_eq!(setting_row(row, &s).1, before, "{row:?} did not come back");
+        }
+        let mut s = AnimSettings { wind: 2, wave_speed: 1, ..AnimSettings::default() };
+        adjust(Row::Wind, &mut s, true);
+        adjust(Row::WaveSpeed, &mut s, false);
+        assert_eq!((s.wind, s.wave_speed), (-2, 5));
+        s.effect = "random".to_string();
+        adjust(Row::Effect, &mut s, true);
+        assert_eq!(s.effect, "fire");
+    }
+}

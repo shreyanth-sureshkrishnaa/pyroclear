@@ -112,10 +112,11 @@ pyroclear [OPTIONS]
 | Option | Description | Example |
 | :--- | :--- | :--- |
 | **`--start`** | Open the onboarding presentation & guide | `pyroclear --start` |
-| **`--settings`, `-s`** | Adjust FPS, wind direction, animation durations, and flame height decay | `pyroclear --settings` |
+| **`--settings`, `-s`** | Pick the effect, adjust FPS and duration, plus the chosen effect's own settings (e.g. wind and flame height for `fire`) | `pyroclear --settings` |
 | **`--pick`, `-p`** | Interactive color palette picker with live swatches | `pyroclear --pick` |
 | **`--custom`** | TUI to save, name, manage and run custom gradients | `pyroclear --custom` |
 | **`--color <name>`** | Burn with a specific named palette (saves as default) | `pyroclear --color toxic` |
+| **`--effect <name>`** | Animation: `fire` (default), `wave`, `vortex`, `explosion`, or `random` (saves as default) | `pyroclear --effect wave` |
 | **`--from <hex> --to <hex>`**| Burn with a one-off custom gradient | `pyroclear --from "#002080" --to "#00f0ff"` |
 | **`--info`, `-i`** | Display active palette card and configured options | `pyroclear --info` |
 | **`--random`, `-r`** | Run with a random palette every time | `pyroclear --random` |
