@@ -17,6 +17,16 @@ pub struct AnimSettings {
     pub direction: u8,   // 0 = Bottom→Top (default), 1 = Top→Bottom, 2 = Left→Right, 3 = Right→Left
     pub duration: f32,   // 1 = 1 seconds, 1.2 = 1.2 seconds .. 5 = 5 seconds
     pub flames_duration: f32,   // 0 = stops instantly, 1 = stops at the end of the animation
+    pub effect: String,  // one of engine::EFFECTS, or "random"
+    pub wave_speed: u8,  // 1 = Very Slow .. 3 = Normal .. 5 = Very Fast
+    pub wave_angle: i32, // crest tilt in degrees, -30..=30; 0 = level
+    pub vortex_outward: bool, // false = arms sweep in to the center, true = out from it
+    pub vortex_speed: u8, // 1 = Very Slow .. 3 = Normal .. 5 = Very Fast
+    pub vortex_clockwise: bool, // galaxy spin direction on screen
+    pub explosion_count: u8,  // 1 = Single, 2 = Few, 3 = Some, 4 = Many, 5 = Barrage
+    pub explosion_speed: u8,  // 1 = Very Slow .. 3 = Normal .. 5 = Very Fast
+    pub explosion_rhythm: u8, // 0 = Together, 1 = Staggered, 2 = Chain (left → right)
+    pub explosion_debris: u8, // 0 = None, 1 = Some, 2 = Lots
 }
 
 impl Default for AnimSettings {
@@ -28,6 +38,16 @@ impl Default for AnimSettings {
             direction: 0,
             duration: 2.2,
             flames_duration: 0.38,
+            effect: "fire".to_string(),
+            wave_speed: 3,
+            wave_angle: 0,
+            vortex_outward: false,
+            vortex_speed: 3,
+            vortex_clockwise: true,
+            explosion_count: 3,
+            explosion_speed: 3,
+            explosion_rhythm: 1,
+            explosion_debris: 1,
         }
     }
 }
@@ -157,7 +177,53 @@ pub fn load_config() -> (Option<PaletteChoice>, AnimSettings) {
                         settings.flames_duration = f;
                     }
                 }
-         
+                "effect" if validate_effect(&val).is_ok() => settings.effect = val,
+                "wave_speed" => {
+                    if let Ok(n) = val.parse::<u8>() {
+                        settings.wave_speed = n.clamp(1, 5);
+                    }
+                }
+                "wave_angle" => {
+                    if let Ok(n) = val.parse::<i32>() {
+                        settings.wave_angle = n.clamp(-30, 30);
+                    }
+                }
+                "vortex_outward" => {
+                    if let Ok(b) = val.parse::<bool>() {
+                        settings.vortex_outward = b;
+                    }
+                }
+                "vortex_speed" => {
+                    if let Ok(n) = val.parse::<u8>() {
+                        settings.vortex_speed = n.clamp(1, 5);
+                    }
+                }
+                "vortex_clockwise" => {
+                    if let Ok(b) = val.parse::<bool>() {
+                        settings.vortex_clockwise = b;
+                    }
+                }
+                "explosion_count" => {
+                    if let Ok(n) = val.parse::<u8>() {
+                        settings.explosion_count = n.clamp(1, 5);
+                    }
+                }
+                "explosion_speed" => {
+                    if let Ok(n) = val.parse::<u8>() {
+                        settings.explosion_speed = n.clamp(1, 5);
+                    }
+                }
+                "explosion_rhythm" => {
+                    if let Ok(n) = val.parse::<u8>() {
+                        settings.explosion_rhythm = n.min(2);
+                    }
+                }
+                "explosion_debris" => {
+                    if let Ok(n) = val.parse::<u8>() {
+                        settings.explosion_debris = n.min(2);
+                    }
+                }
+
                 _ => {}
             }
         }
@@ -200,6 +266,16 @@ pub fn save_config(choice: &PaletteChoice, settings: &AnimSettings) {
     content.push_str(&format!("direction        = {}\n", settings.direction)); // 0=Bottom→Top 1=Top→Bottom 2=Left→Right 3=Right→Left
     content.push_str(&format!("duration         = {}\n", settings.duration));
     content.push_str(&format!("flames_duration  = {}\n", settings.flames_duration));
+    content.push_str(&format!("effect           = \"{}\"\n", settings.effect));
+    content.push_str(&format!("wave_speed       = {}\n", settings.wave_speed));
+    content.push_str(&format!("wave_angle       = {}\n", settings.wave_angle));
+    content.push_str(&format!("vortex_outward   = {}\n", settings.vortex_outward));
+    content.push_str(&format!("vortex_speed     = {}\n", settings.vortex_speed));
+    content.push_str(&format!("vortex_clockwise = {}\n", settings.vortex_clockwise));
+    content.push_str(&format!("explosion_count  = {}\n", settings.explosion_count));
+    content.push_str(&format!("explosion_speed  = {}\n", settings.explosion_speed));
+    content.push_str(&format!("explosion_rhythm = {}\n", settings.explosion_rhythm)); // 0=Together 1=Staggered 2=Chain
+    content.push_str(&format!("explosion_debris = {}\n", settings.explosion_debris)); // 0=None 1=Some 2=Lots
     let _ = std::fs::write(path, content);
 }
 
@@ -314,6 +390,36 @@ pub fn validate_named(name: &str) -> Result<(), String> {
 
 pub fn has_no_save() -> bool {
     std::env::args().any(|a| a == "--no-save")
+}
+
+fn validate_effect(name: &str) -> Result<(), String> {
+    if name == "random" || crate::engine::EFFECTS.contains(&name) {
+        return Ok(());
+    }
+    Err(format!(
+        "Unknown effect '{name}' (expected {} or random)",
+        crate::engine::EFFECTS.join(", ")
+    ))
+}
+
+/// The value of `--effect <name>`, if given. Exits on a missing or unknown name.
+fn effect_arg() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    let i = args.iter().position(|a| a == "--effect")?;
+    let checked = match args.get(i + 1) {
+        Some(name) => validate_effect(name).map(|()| name.clone()),
+        None => Err("--effect needs a name".to_string()),
+    };
+    match checked {
+        Ok(name) => Some(name),
+        Err(e) => {
+            eprintln!(
+                "{ESC}[1;38;2;255;70;70m✗ error:{ESC}[0m {e}\n\
+                 {ESC}[38;2;95;95;115m  tip: pyroclear --effect wave{ESC}[0m"
+            );
+            std::process::exit(1);
+        }
+    }
 }
 
 pub fn random_palette_choice() -> PaletteChoice {
@@ -457,7 +563,12 @@ fn parse_args(saved_settings: &AnimSettings) -> (Option<PaletteChoice>, Option<A
 
 /// Resolve the final (palette choice, animation settings) pair for this run.
 pub fn resolve_choice() -> (PaletteChoice, AnimSettings) {
-    let (saved_choice, saved_settings) = load_config();
+    let (saved_choice, mut saved_settings) = load_config();
+    // Applied before any TUI opens, so the TUI starts on it and has the last word.
+    let effect = effect_arg();
+    if let Some(e) = &effect {
+        saved_settings.effect = e.clone();
+    }
     let (parsed_choice, parsed_settings, run_settings, is_reset) = parse_args(&saved_settings);
 
     if is_reset {
@@ -486,7 +597,11 @@ pub fn resolve_choice() -> (PaletteChoice, AnimSettings) {
         }
     }
 
-    if let Some(choice) = choice_opt {
+    // A new palette, or `--effect` alone, is saved for future runs.
+    if choice_opt.is_some() || effect.is_some() {
+        let choice = choice_opt
+            .or(saved_choice)
+            .unwrap_or(PaletteChoice::Named("fire".to_string()));
         if !has_no_save() {
             save_config(&choice, &settings);
         }

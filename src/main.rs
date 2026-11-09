@@ -1,4 +1,4 @@
-// pyroclear — terminal goes up in flames, then clears.
+// pyroclear — terminal goes up in flames (or another effect), then clears.
 //
 // Doom-fire algorithm: a heat grid (0..=36) where the bottom row is
 // the fire source. Each frame, every cell pulls its new value from
@@ -16,7 +16,8 @@
 //   palettes  — palette data, color math, swatch renderers
 //   config    — AnimSettings, PaletteChoice, config I/O, CLI parsing
 //   display   — banner, help, info, start guide, color list
-//   engine    — PRNG, terminal size, fire simulation loop
+//   engine    — PRNG, terminal size, fire simulation loop, wave / vortex /
+//               explosion effects
 //   tui       — raw terminal, key input, picker & settings TUIs
 //   win       — hand-rolled Win32 console bindings (Windows only)
 
