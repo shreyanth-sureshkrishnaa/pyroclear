@@ -53,6 +53,15 @@ Or build from source:
   cargo install --path .
   ```
 
+Or from PKGBUILD on arch linux
+
+```
+  git clone https://github.com/shreyanth-sureshkrishnaa/pyroclear.git
+  cd pyroclear
+
+  makepkg -si
+```
+
 Install via NixOS Flakes:
 
 ```nix
